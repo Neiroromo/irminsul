@@ -3,7 +3,7 @@ name = "irminsul"
 version = "0.2.2"
 authors = ["Konkers <konkers@konkers.net>"]
 edition = "2024"
-include = ["LICENSE-APACHE", "LICENSE-MIT", "**/*.rs", "Cargo.toml"]
+include = ["LICENSE-APACHE", "LICENSE-MIT", "**/*.rs", "Cargo.toml", "src/data/*.json"]
 rust-version = "1.85"
 
 [package.metadata.docs.rs]
@@ -86,6 +86,8 @@ tokio = { version = "1.47.1", features = [
 	"rt-multi-thread",
 ] }
 
+reqwest = "0.12.23"
+serde_json = "1.0.143"
 winresource = "0.1.23"
 
 [features]

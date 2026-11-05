@@ -14,6 +14,9 @@ use tracing_subscriber::{EnvFilter, reload};
 
 use crate::player_data::ExportSettings;
 
+mod achievement;
+mod achievement_data;
+mod achievement_tab;
 mod admin;
 mod app;
 mod capture;
@@ -56,6 +59,8 @@ pub enum Message {
     StartCapture,
     StopCapture,
     ExportGenshinOptimizer(ExportSettings, oneshot::Sender<Result<String>>),
+    ExportAchievements(oneshot::Sender<Result<String>>),
+    FinishedAchievements(oneshot::Sender<Vec<u32>>),
 }
 
 #[derive(Clone, Debug)]

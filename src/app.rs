@@ -8,14 +8,17 @@ use std::time::Instant;
 use anyhow::{Context as _, Result, anyhow};
 use chrono::Local;
 use egui::{
-    Button, Color32, Context, DragValue, Id, Key, KeyboardShortcut, Modal, Modifiers, OpenUrl,
-    PointerButton, RichText, Sense, ViewportCommand,
+    Button, Color32, Context, DragValue, Frame, Id, Key, KeyboardShortcut, Margin, Modal,
+    Modifiers, OpenUrl, PointerButton, RichText, Sense, ViewportCommand,
 };
 use egui_file_dialog::FileDialog;
 use egui_notify::Toasts;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
 
+use crate::achievement_tab::{
+    AchievementProgress, AchievementTab, TAB_BACKGROUND, TAB_WINDOW_SIZE,
+};
 use crate::monitor::Monitor;
 use crate::player_data::ExportSettings;
 use crate::update::check_for_app_update;
@@ -32,6 +35,8 @@ pub struct SavedAppState {
     log_raw_packets: bool,
     #[serde(default)]
     tracing_level: TracingLevel,
+    #[serde(default)]
+    achievement_progress: AchievementProgress,
 }
 
 impl Default for SavedAppState {
@@ -56,8 +61,18 @@ impl Default for SavedAppState {
             auto_start_capture: false,
             log_raw_packets: false,
             tracing_level: Default::default(),
+            achievement_progress: Default::default(),
         }
     }
+}
+
+/// Size of the main window outside of the achievement tracker tab.
+const WINDOW_SIZE: egui::Vec2 = egui::vec2(800., 500.);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MainTab {
+    Export,
+    Achievements,
 }
 
 #[derive(Clone, Debug)]
@@ -86,6 +101,15 @@ pub struct IrminsulApp {
     optimizer_save_dialog: Option<FileDialog>,
     optimizer_save_path: Option<PathBuf>,
     optimizer_export_target: OptimizerExportTarget,
+
+    achievement_export_rx: Option<oneshot::Receiver<Result<String>>>,
+    achievement_save_dialog: Option<FileDialog>,
+    achievement_save_path: Option<PathBuf>,
+    achievement_export_target: OptimizerExportTarget,
+
+    main_tab: MainTab,
+    window_enlarged: bool,
+    achievement_tab: AchievementTab,
 
     restarting: bool,
 
@@ -218,6 +242,13 @@ impl IrminsulApp {
             optimizer_save_dialog: None,
             optimizer_save_path: None,
             optimizer_export_target: OptimizerExportTarget::None,
+            achievement_export_rx: None,
+            achievement_save_dialog: None,
+            achievement_save_path: None,
+            achievement_export_target: OptimizerExportTarget::None,
+            main_tab: MainTab::Export,
+            window_enlarged: false,
+            achievement_tab: AchievementTab::new(),
             restarting: false,
             state_rx,
             wish_url_rx,
@@ -242,11 +273,32 @@ impl eframe::App for IrminsulApp {
         if let Some(optimizer_save_dialog) = &mut self.optimizer_save_dialog {
             optimizer_save_dialog.update(ctx);
         }
+        if let Some(achievement_save_dialog) = &mut self.achievement_save_dialog {
+            achievement_save_dialog.update(ctx);
+        }
+
+        // The achievement tracker needs more room than the main window has.
+        let tracker_open = matches!(self.state_rx.borrow().state, State::Main)
+            && self.main_tab == MainTab::Achievements;
+        if tracker_open != self.window_enlarged {
+            self.window_enlarged = tracker_open;
+            let size = if tracker_open {
+                TAB_WINDOW_SIZE
+            } else {
+                WINDOW_SIZE
+            };
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
-                egui::Image::new(egui::include_image!("../assets/background.webp"))
-                    .paint_at(ui, ui.ctx().screen_rect());
+                if tracker_open {
+                    ui.painter()
+                        .rect_filled(ui.ctx().screen_rect(), 0., TAB_BACKGROUND);
+                } else {
+                    egui::Image::new(egui::include_image!("../assets/background.webp"))
+                        .paint_at(ui, ui.ctx().screen_rect());
+                }
             });
 
             ui.vertical(|ui| {
@@ -285,6 +337,22 @@ impl eframe::App for IrminsulApp {
                     if modal.should_close() {
                         self.bug_report_open = false;
                     }
+                }
+
+                if tracker_open {
+                    let state = self.state_rx.borrow_and_update().clone();
+                    Frame::new()
+                        .inner_margin(Margin::symmetric(20, 0))
+                        .show(ui, |ui| {
+                            self.achievement_tab.ui(
+                                ui,
+                                &mut self.saved_state.achievement_progress,
+                                state.updated.achievements_updated.is_some(),
+                                &self.ui_message_tx,
+                                &mut self.toasts,
+                            );
+                        });
+                    return;
                 }
 
                 ui.horizontal(|ui| {
@@ -350,10 +418,26 @@ impl eframe::App for IrminsulApp {
 }
 
 impl IrminsulApp {
-    fn title_bar(&self, ui: &mut egui::Ui) {
-        let (_, button_width) = egui::Sides::new().show(
+    fn title_bar(&mut self, ui: &mut egui::Ui) {
+        let in_main = matches!(self.state_rx.borrow().state, State::Main);
+        let (tabs_width, button_width) = egui::Sides::new().show(
             ui,
-            |_ui| {},
+            |ui| {
+                if in_main {
+                    ui.add_space(8.);
+                    for (tab, label) in [
+                        (MainTab::Export, "Export"),
+                        (MainTab::Achievements, "Achievements"),
+                    ] {
+                        ui.selectable_value(
+                            &mut self.main_tab,
+                            tab,
+                            RichText::new(label).size(16.),
+                        );
+                    }
+                }
+                ui.min_rect().width()
+            },
             |ui| {
                 let button = ui.add(
                     Button::new(RichText::new(egui_material_icons::icons::ICON_CLOSE).size(24.))
@@ -372,6 +456,7 @@ impl IrminsulApp {
         let title_bar_rect = {
             let mut rect = app_rect;
             rect.max.y = rect.min.y + title_bar_height;
+            rect.min.x += tabs_width;
             rect.max.x -= button_width;
             rect
         };
@@ -941,9 +1026,94 @@ impl IrminsulApp {
         Ok(())
     }
 
-    fn achievement_ui(&self, ui: &mut egui::Ui, _app_state: &AppState) {
-        Self::section_header(ui, "Achievement Export");
-        ui.label("coming soon".to_string());
+    fn achievement_ui(&mut self, ui: &mut egui::Ui, app_state: &AppState) {
+        self.achievement_handle_export(ui).toast_error(self);
+
+        ui.vertical(|ui| {
+            egui::Sides::new().show(
+                ui,
+                |ui| {
+                    Self::section_header(ui, "Achievement Export");
+                },
+                |ui| {
+                    ui.add_enabled_ui(
+                        app_state.updated.achievements_updated.is_some()
+                            && self.achievement_export_rx.is_none(),
+                        |ui| {
+                            if ui
+                                .button(egui_material_icons::icons::ICON_DOWNLOAD)
+                                .clicked()
+                            {
+                                let now = Local::now();
+                                let mut achievement_save_dialog = FileDialog::new()
+                                    .add_file_filter_extensions("JSON files", vec!["json"])
+                                    .default_file_name(&format!(
+                                        "achievements_{}.json",
+                                        now.format("%Y-%m-%d_%H-%M")
+                                    ));
+                                achievement_save_dialog.save_file();
+                                self.achievement_save_dialog = Some(achievement_save_dialog);
+                            }
+
+                            if let Some(achievement_save_dialog) = &mut self.achievement_save_dialog
+                                && let Some(path) = achievement_save_dialog.take_picked()
+                            {
+                                self.achievement_save_path = Some(path);
+                                self.achievement_request_export(OptimizerExportTarget::File);
+                            }
+
+                            if ui
+                                .button(egui_material_icons::icons::ICON_CONTENT_PASTE_GO)
+                                .clicked()
+                            {
+                                self.achievement_request_export(OptimizerExportTarget::Clipboard);
+                            }
+                        },
+                    );
+                },
+            );
+        });
+    }
+
+    fn achievement_request_export(&mut self, target: OptimizerExportTarget) {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.ui_message_tx.send(Message::ExportAchievements(tx));
+        self.achievement_export_target = target;
+        self.achievement_export_rx = Some(rx);
+    }
+
+    fn achievement_handle_export(&mut self, ui: &mut egui::Ui) -> Result<()> {
+        let Some(rx) = self.achievement_export_rx.take() else {
+            return Ok(());
+        };
+
+        let json = rx.blocking_recv()??;
+
+        match self.achievement_export_target {
+            OptimizerExportTarget::None => {
+                tracing::warn!("Unexpected achievement export");
+            }
+            OptimizerExportTarget::Clipboard => {
+                ui.ctx().copy_text(json);
+                self.toasts.info("Achievement data copied to clipboard");
+            }
+            OptimizerExportTarget::File => {
+                let path = self
+                    .achievement_save_path
+                    .take()
+                    .ok_or_else(|| anyhow!("No save file path set"))?;
+
+                let file =
+                    File::create(&path).with_context(|| format!("Unable to open file {path:?}"))?;
+                let mut writer = BufWriter::new(file);
+                writer.write_all(json.as_bytes())?;
+
+                self.toasts.info("Achievement data saved to file");
+            }
+        }
+
+        self.achievement_export_target = OptimizerExportTarget::None;
+        Ok(())
     }
 
     fn section_header(ui: &mut egui::Ui, name: &str) {

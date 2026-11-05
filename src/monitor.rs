@@ -127,6 +127,12 @@ impl Monitor {
             Message::ExportGenshinOptimizer(settings, reply_tx) => {
                 let _ = reply_tx.send(self.player_data.export_genshin_optimizer(&settings));
             }
+            Message::ExportAchievements(reply_tx) => {
+                let _ = reply_tx.send(self.player_data.export_achievements());
+            }
+            Message::FinishedAchievements(reply_tx) => {
+                let _ = reply_tx.send(self.player_data.finished_achievement_ids());
+            }
             _ => (),
         }
     }
@@ -161,8 +167,9 @@ impl Monitor {
                 has_new_data = true;
             } else if let Some(achievements) = matches_achievement_packet(&command) {
                 tracing::info!(
-                    "Found achievement packet with {} achievements",
-                    achievements.len()
+                    "Found achievement packet with {} achievements ({} finished)",
+                    achievements.len(),
+                    achievements.iter().filter(|a| a.status >= 2).count()
                 );
                 self.player_data.process_achievements(&achievements);
                 updated.achievements_updated = Some(Instant::now());

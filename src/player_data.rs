@@ -69,6 +69,14 @@ impl PlayerData {
         self.items = items.into();
     }
 
+    pub fn export_achievements(&self) -> Result<String> {
+        crate::achievement::export_achievements(&self.achievements)
+    }
+
+    pub fn finished_achievement_ids(&self) -> Vec<u32> {
+        crate::achievement::finished_ids(&self.achievements)
+    }
+
     pub fn export_genshin_optimizer(&self, settings: &ExportSettings) -> Result<String> {
         let mut good = good::Good {
             format: "GOOD".to_string(),
