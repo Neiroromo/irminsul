@@ -19,7 +19,11 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::achievement_tab::{
     AchievementProgress, AchievementTab, TAB_BACKGROUND, TAB_WINDOW_SIZE,
 };
+use crate::autostart;
+use crate::capture_popup::CapturePopup;
 use crate::monitor::Monitor;
+use crate::tray::{Tray, TrayCommand};
+use crate::window_visibility;
 use crate::player_data::ExportSettings;
 use crate::update::check_for_app_update;
 use crate::{
@@ -32,11 +36,21 @@ pub struct SavedAppState {
     export_settings: ExportSettings,
     #[serde(default)]
     auto_start_capture: bool,
+    /// Closing the window hides it in the tray instead of quitting.
+    #[serde(default)]
+    close_to_tray: bool,
+    /// Show the progress popup when the game connects and loads data.
+    #[serde(default = "default_true")]
+    show_capture_popup: bool,
     log_raw_packets: bool,
     #[serde(default)]
     tracing_level: TracingLevel,
     #[serde(default)]
     achievement_progress: AchievementProgress,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for SavedAppState {
@@ -59,6 +73,8 @@ impl Default for SavedAppState {
                 min_weapon_rarity: 3,
             },
             auto_start_capture: false,
+            close_to_tray: false,
+            show_capture_popup: true,
             log_raw_packets: false,
             tracing_level: Default::default(),
             achievement_progress: Default::default(),
@@ -112,6 +128,13 @@ pub struct IrminsulApp {
     achievement_tab: AchievementTab,
 
     restarting: bool,
+    /// Set when quitting for real, as opposed to hiding in the tray.
+    quitting: bool,
+    tray: Option<Tray>,
+    /// Frames left to hide the window in, when it was asked to start hidden.
+    hide_after_start: u8,
+    autostart_enabled: bool,
+    capture_popup: CapturePopup,
 
     saved_state: SavedAppState,
 }
@@ -205,6 +228,8 @@ impl IrminsulApp {
         cc: &eframe::CreationContext<'_>,
         mut tracing_reload_handle: ReloadHandle,
         capture_backend: capture::BackendType,
+        minimized: bool,
+        preview_popup: bool,
     ) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         egui_material_icons::initialize(&cc.egui_ctx);
@@ -220,13 +245,19 @@ impl IrminsulApp {
         let (ui_message_tx, state_rx, wish_url_rx) =
             start_async_runtime(cc.egui_ctx.clone(), log_packets_rx, capture_backend);
 
-        if saved_state.auto_start_capture {
+        // Started minimized, there is nobody to press the button.
+        if saved_state.auto_start_capture || minimized {
             if let Err(e) = ui_message_tx.send(Message::StartCapture) {
                 tracing::error!("Failed to send auto start message: {e}");
             }
         }
 
         let toasts = Toasts::default().with_anchor(egui_notify::Anchor::BottomLeft);
+
+        let mut capture_popup = CapturePopup::new();
+        if preview_popup {
+            capture_popup.start_preview(false);
+        }
 
         Self {
             saved_state,
@@ -250,6 +281,11 @@ impl IrminsulApp {
             window_enlarged: false,
             achievement_tab: AchievementTab::new(),
             restarting: false,
+            quitting: false,
+            tray: Tray::new(&cc.egui_ctx),
+            hide_after_start: if minimized { 3 } else { 0 },
+            autostart_enabled: autostart::is_enabled(),
+            capture_popup,
             state_rx,
             wish_url_rx,
         }
@@ -269,6 +305,7 @@ impl eframe::App for IrminsulApp {
             style.interaction.tooltip_delay = 0.25;
         });
 
+        self.handle_tray(ctx);
         self.toasts.show(ctx);
         if let Some(optimizer_save_dialog) = &mut self.optimizer_save_dialog {
             optimizer_save_dialog.update(ctx);
@@ -414,12 +451,79 @@ impl eframe::App for IrminsulApp {
                 });
             });
         });
+
+        let progress = self.state_rx.borrow().capture_progress.clone();
+        self.capture_popup.update(
+            ctx,
+            &progress,
+            self.saved_state.achievement_progress.language,
+            self.saved_state.show_capture_popup,
+        );
     }
 }
 
 impl IrminsulApp {
+    fn hides_to_tray(&self) -> bool {
+        self.tray.is_some() && self.saved_state.close_to_tray
+    }
+
+    fn set_window_visible(&mut self, visible: bool) {
+        self.hide_after_start = 0;
+        window_visibility::set_visible(visible);
+    }
+
+    /// Closing the window: quit, or hide in the tray where it keeps capturing.
+    fn close_window(&mut self, ctx: &egui::Context) {
+        if self.hides_to_tray() {
+            self.set_window_visible(false);
+        } else {
+            self.quitting = true;
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
+    }
+
+    fn handle_tray(&mut self, ctx: &egui::Context) {
+        // eframe shows the window after its first frame even if it was asked to
+        // start hidden, and sets its style while at it, so when started in the
+        // tray it is hidden a few times over.
+        if self.hide_after_start > 0 {
+            self.hide_after_start -= 1;
+            window_visibility::set_visible(false);
+        }
+
+        let commands = self.tray.as_ref().map(Tray::commands).unwrap_or_default();
+        for command in commands {
+            match command {
+                TrayCommand::Quit => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(ViewportCommand::Close);
+                }
+            }
+        }
+
+        // Closing by other means than the close button (Alt+F4, the taskbar).
+        let close_requested = ctx.input(|input| input.viewport().close_requested());
+        if close_requested && !self.quitting && !self.restarting && self.hides_to_tray() {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            self.set_window_visible(false);
+        }
+
+        // A hidden window can't be answered, so bring it up for the questions
+        // that block everything else.
+        let needs_answer = matches!(
+            self.state_rx.borrow().state,
+            State::WaitingForUpdateConfirmation(_)
+                | State::WaitingForDownloadConfirmation(_)
+                | State::Updated { needs_caps: true }
+        );
+        if needs_answer && !window_visibility::is_visible() {
+            self.set_window_visible(true);
+        }
+    }
+
     fn title_bar(&mut self, ui: &mut egui::Ui) {
         let in_main = matches!(self.state_rx.borrow().state, State::Main);
+        let mut close_clicked = false;
         let (tabs_width, button_width) = egui::Sides::new().show(
             ui,
             |ui| {
@@ -444,11 +548,14 @@ impl IrminsulApp {
                         .frame(false),
                 );
                 if button.clicked() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    close_clicked = true;
                 }
                 button.rect.width()
             },
         );
+        if close_clicked {
+            self.close_window(ui.ctx());
+        }
 
         let app_rect = ui.max_rect();
 
@@ -519,6 +626,7 @@ impl IrminsulApp {
         }
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         self.restarting = true;
+        self.quitting = true;
     }
 
     fn updated_ui(&mut self, ui: &mut egui::Ui, needs_caps: bool) {
@@ -652,6 +760,16 @@ impl IrminsulApp {
                 Self::data_state(ui, "Characters", app_state.updated.characters_updated);
                 Self::data_state(ui, "Achievements", app_state.updated.achievements_updated);
             });
+        if let Some(error) = &app_state.capture_error {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(error)
+                        .size(12.)
+                        .color(Color32::from_rgb(0xff, 0x6b, 0x6b)),
+                )
+                .wrap(),
+            );
+        }
     }
 
     fn data_state(ui: &mut egui::Ui, source: &str, last_updated: Option<Instant>) {
@@ -763,7 +881,7 @@ impl IrminsulApp {
     }
 
     fn power_tools_modal(&mut self, ui: &mut egui::Ui) {
-        ui.set_width(300.0);
+        ui.set_width(460.0);
         ui.heading("Power Tools");
         ui.separator();
         if ui
@@ -803,6 +921,8 @@ impl IrminsulApp {
         }
         ui.end_row();
         ui.separator();
+        self.debug_timeline_ui(ui);
+        ui.separator();
         egui::Sides::new().show(
             ui,
             |_ui| {},
@@ -812,6 +932,69 @@ impl IrminsulApp {
                 }
             },
         );
+    }
+
+    /// Markers for the debug timeline, and the latest lines of it.
+    fn debug_timeline_ui(&mut self, ui: &mut egui::Ui) {
+        const MARKS: [&str; 7] = [
+            "HoYoPlay opened",
+            "Play pressed",
+            "Game window shown",
+            "Login clicked",
+            "Door clicked",
+            "World loaded",
+            "Logged out",
+        ];
+
+        ui.label(RichText::new("Debug timeline").size(16.));
+        ui.label(
+            RichText::new(
+                "Press these as you go through the game's launch and login. Each press is                  saved with the time, next to what the capture sees.",
+            )
+            .size(12.),
+        );
+        ui.horizontal_wrapped(|ui| {
+            for mark in MARKS {
+                if ui.button(mark).clicked() {
+                    let _ = self.ui_message_tx.send(Message::DebugMark(mark.to_string()));
+                }
+            }
+        });
+
+        let lines = self.state_rx.borrow().debug_events.clone();
+        Frame::new()
+            .fill(Color32::from_black_alpha(80))
+            .inner_margin(Margin::same(6))
+            .show(ui, |ui| {
+                ui.set_min_height(150.);
+                if lines.is_empty() {
+                    ui.label(RichText::new("Nothing recorded yet").size(11.));
+                }
+                for line in lines {
+                    ui.add(egui::Label::new(RichText::new(line).monospace().size(11.)).truncate());
+                }
+            });
+
+        ui.horizontal(|ui| {
+            if ui.button("Preview capture popup").clicked() {
+                self.capture_popup.start_preview(false);
+            }
+            if ui.button("Preview failure").clicked() {
+                self.capture_popup.start_preview(true);
+            }
+        });
+
+        if ui.button("Open timeline folder").clicked() {
+            match crate::debug_timeline::debug_dir() {
+                Ok(dir) => {
+                    let _ = std::fs::create_dir_all(&dir);
+                    if let Err(e) = open::that(dir) {
+                        tracing::error!("unable to open the timeline folder: {e}");
+                    }
+                }
+                Err(e) => tracing::error!("{e}"),
+            }
+        }
     }
 
     fn bug_report_modal(&mut self, ui: &mut egui::Ui) {
@@ -843,13 +1026,46 @@ impl IrminsulApp {
     }
 
     fn capture_settings_modal(&mut self, ui: &mut egui::Ui) {
-        ui.set_width(300.0);
-        ui.heading("Genshin Optimizer Settings");
+        ui.set_width(380.0);
+        ui.heading("Capture Settings");
         ui.separator();
         ui.checkbox(
             &mut self.saved_state.auto_start_capture,
             "Start capture on Irminsul launch",
         );
+        ui.checkbox(
+            &mut self.saved_state.show_capture_popup,
+            "Show a progress popup while the game's data is captured",
+        );
+        ui.add_enabled_ui(self.tray.is_some(), |ui| {
+            ui.checkbox(
+                &mut self.saved_state.close_to_tray,
+                "Keep running in the tray when the window is closed",
+            );
+
+            let mut autostart = self.autostart_enabled;
+            if ui
+                .checkbox(&mut autostart, "Start with Windows, hidden in the tray")
+                .on_hover_text(
+                    "Starts Irminsul in the tray when you log on and captures right away, \
+                     so it sees the game connect. Needs administrator rights.",
+                )
+                .changed()
+            {
+                match autostart::set_enabled(autostart) {
+                    Ok(()) => {
+                        self.autostart_enabled = autostart;
+                        if autostart {
+                            self.saved_state.close_to_tray = true;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("unable to change the startup setting: {e:#}");
+                        self.toasts.error(format!("{e:#}"));
+                    }
+                }
+            }
+        });
         ui.separator();
         egui::Sides::new().show(
             ui,

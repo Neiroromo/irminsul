@@ -19,10 +19,15 @@ mod achievement_data;
 mod achievement_tab;
 mod admin;
 mod app;
+mod autostart;
 mod capture;
+mod capture_popup;
+mod debug_timeline;
 mod good;
 mod monitor;
 mod player_data;
+mod tray;
+mod window_visibility;
 mod update;
 mod wish;
 
@@ -61,6 +66,8 @@ pub enum Message {
     ExportGenshinOptimizer(ExportSettings, oneshot::Sender<Result<String>>),
     ExportAchievements(oneshot::Sender<Result<String>>),
     FinishedAchievements(oneshot::Sender<Vec<u32>>),
+    /// A marker for the debug timeline, e.g. "Door clicked".
+    DebugMark(String),
 }
 
 #[derive(Clone, Debug)]
@@ -86,10 +93,28 @@ impl Default for DataUpdated {
     }
 }
 
+/// How far capturing the data of the current connection to the game has come.
+#[derive(Clone, Debug, Default)]
+pub struct CaptureProgress {
+    /// Counts the connections to the game server, to tell a new one apart.
+    pub session: u64,
+    pub key_found: bool,
+    pub items: bool,
+    pub characters: bool,
+    pub achievements: bool,
+    /// The data of this connection can't be read.
+    pub failed: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct AppState {
     state: State,
     capturing: bool,
+    /// Why packet capture or decoding is not working, if it is not.
+    capture_error: Option<String>,
+    /// The latest debug timeline lines.
+    debug_events: Vec<String>,
+    capture_progress: CaptureProgress,
     updated: DataUpdated,
 }
 
@@ -98,6 +123,9 @@ impl AppState {
         AppState {
             state: State::Starting,
             capturing: false,
+            capture_error: None,
+            debug_events: Vec::new(),
+            capture_progress: CaptureProgress::default(),
             updated: DataUpdated::new(),
         }
     }
@@ -108,6 +136,14 @@ impl AppState {
 struct Args {
     #[arg(long, default_value_t = false)]
     no_admin: bool,
+
+    /// Start with the window hidden in the tray, capturing right away.
+    #[arg(long, default_value_t = false)]
+    minimized: bool,
+
+    /// Play the capture popup once after starting.
+    #[arg(long, hide = true, default_value_t = false)]
+    preview_popup: bool,
 
     #[arg(
         long = "capture-backend",
@@ -176,19 +212,31 @@ fn main() -> eframe::Result {
     }
 
     let capture_backend = args.capture_backend;
+    let minimized = args.minimized;
+    let preview_popup = args.preview_popup;
 
     let background_image_size = [1600., 1000.];
 
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size(background_image_size.map(|v| v * 0.5))
+        .with_resizable(false)
+        .with_decorations(false)
+        .with_icon(
+            // NOTE: Adding an icon is optional
+            eframe::icon_data::from_png_bytes(&include_bytes!("../assets/icon-256.png")[..])
+                .expect("Failed to load icon"),
+        );
+    if minimized {
+        // eframe shows the window once it painted its first frame, whatever is
+        // asked for.  Out of sight, that doesn't show until the app hides it
+        // properly.
+        viewport = viewport.with_position([
+            window_visibility::HIDDEN_POSITION,
+            window_visibility::HIDDEN_POSITION,
+        ]);
+    }
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size(background_image_size.map(|v| v * 0.5))
-            .with_resizable(false)
-            .with_decorations(false)
-            .with_icon(
-                // NOTE: Adding an icon is optional
-                eframe::icon_data::from_png_bytes(&include_bytes!("../assets/icon-256.png")[..])
-                    .expect("Failed to load icon"),
-            ),
+        viewport,
         persist_window: false,
         ..Default::default()
     };
@@ -200,6 +248,8 @@ fn main() -> eframe::Result {
                 cc,
                 reload_handle,
                 capture_backend,
+                minimized,
+                preview_popup,
             )))
         }),
     )

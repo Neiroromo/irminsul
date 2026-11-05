@@ -26,3 +26,9 @@ https://github.com/MadeBaruna/paimon-moe (`src/data/achievement/`) and used unde
     LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
+## auto-artifactarium
+
+`vendor/auto-artifactarium` is a copy of https://github.com/konkers/auto-artifactarium
+(rev `abbbf7a`, MIT license, see `vendor/auto-artifactarium/LICENSE`) with item and
+avatar packets matched by content instead of by command id and protobuf field number.
+The approach follows the idea of upstream pull request #1.

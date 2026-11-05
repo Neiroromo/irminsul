@@ -35,6 +35,10 @@ pub struct PlayerData {
     achievements: Vec<Achievement>,
     characters: Vec<AvatarInfo>,
     items: Vec<Item>,
+    /// Sizes of the full lists taken in the current connection.  Partial
+    /// updates look like full lists, and are told apart by being much smaller.
+    character_baseline: usize,
+    item_baseline: usize,
 
     character_equip_guid_map: HashMap<u64, u32>,
 }
@@ -46,6 +50,8 @@ impl PlayerData {
             achievements: Vec::new(),
             characters: Vec::new(),
             items: Vec::new(),
+            character_baseline: 0,
+            item_baseline: 0,
             character_equip_guid_map: HashMap::new(),
         }
     }
@@ -54,7 +60,19 @@ impl PlayerData {
         self.achievements = achievements.into();
     }
 
-    pub fn process_characters(&mut self, avatars: &[AvatarInfo]) {
+    /// A new connection to the game server starts, so its lists replace the
+    /// old ones whatever their size.
+    pub fn start_session(&mut self) {
+        self.character_baseline = 0;
+        self.item_baseline = 0;
+    }
+
+    /// Returns false when the list was ignored as a partial update.
+    pub fn process_characters(&mut self, avatars: &[AvatarInfo]) -> bool {
+        if avatars.len() * 2 < self.character_baseline {
+            return false;
+        }
+        self.character_baseline = avatars.len();
         self.character_equip_guid_map.clear();
         for avatar in avatars {
             for guid in &avatar.equip_guid_list {
@@ -63,10 +81,17 @@ impl PlayerData {
             }
         }
         self.characters = avatars.into();
+        true
     }
 
-    pub fn process_items(&mut self, items: &[Item]) {
+    /// Returns false when the list was ignored as a partial update.
+    pub fn process_items(&mut self, items: &[Item]) -> bool {
+        if items.len() * 2 < self.item_baseline {
+            return false;
+        }
+        self.item_baseline = items.len();
         self.items = items.into();
+        true
     }
 
     pub fn export_achievements(&self) -> Result<String> {

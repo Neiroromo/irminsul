@@ -24,7 +24,9 @@ tokio = { version = "1.47.1", features = [
 anyhow = "1.0.99"
 async-trait = "0.1.92"
 async-watcher = "0.3.0"
-auto-artifactarium = { git = "https://github.com/konkers/auto-artifactarium", rev = "abbbf7a3f58846512250a789a76be2d3cdb115c1" }
+# Vendored from konkers/auto-artifactarium (abbbf7a) with content-based item and
+# avatar matching, see vendor/auto-artifactarium.
+auto-artifactarium = { path = "vendor/auto-artifactarium" }
 base64 = "0.22.1"
 chrono = "0.4.42"
 clap = { version = "4.5.47", features = ["derive"] }
@@ -62,11 +64,15 @@ tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 
 [target.'cfg(windows)'.dependencies]
+tray-icon = "0.26.1"
 pktmon = { version = "0.6.2", features = ["tokio"] }
 windows = { version = "0.61.3", features = [
 	"Win32_System_Console",
 	"Win32_System_Registry",
+	"Win32_Graphics_Gdi",
+	"Win32_UI_HiDpi",
 	"Win32_UI_Shell",
+	"Win32_UI_WindowsAndMessaging",
 ] }
 
 [target.'cfg(unix)'.dependencies]
