@@ -10,6 +10,11 @@ use tokio::sync::{mpsc, watch};
 
 use crate::{AppState, Message, State};
 
+/// Whether Irminsul checks for and offers new versions of itself.  Off in this
+/// fork: the releases it would look at are the original repository's, and
+/// installing one would replace this fork's changes with the original's.
+const APP_UPDATE_CHECK_ENABLED: bool = false;
+
 pub fn check_for_new_version() -> Result<Option<Release>> {
     // This needs to be outside of an async context otherwise it panics.
     let releases = thread::spawn(move || -> Result<Vec<Release>> {
@@ -179,6 +184,11 @@ pub async fn check_for_app_update(
     state_tx: &watch::Sender<AppState>,
     ui_message_rx: &mut mpsc::UnboundedReceiver<Message>,
 ) -> Result<()> {
+    if !APP_UPDATE_CHECK_ENABLED {
+        tracing::info!("app update check is disabled in this fork");
+        return Ok(());
+    }
+
     let mut app_state = state_tx.borrow().clone();
     app_state.state = State::CheckingForUpdate;
     state_tx.send(app_state.clone()).unwrap();
