@@ -8,7 +8,8 @@ use anime_game_data::AnimeGameData;
 use anyhow::{Context, Result, anyhow};
 use auto_artifactarium::{
     ConnectionPacket, GameCommand, GamePacket, GameSniffer, SnifferEvent, matches_achievement_packet, matches_avatar_packet,
-    matches_item_packet,
+    matches_avatar_props, matches_avatar_stats, matches_item_changes, matches_item_packet, matches_talent_level,
+    matches_player_mora, matches_player_props,
 };
 use base64::prelude::*;
 use chrono::prelude::*;
@@ -18,8 +19,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::capture::{BackendType, CaptureError, create_capture};
 use crate::debug_timeline::DebugTimeline;
-use crate::player_data::PlayerData;
-use crate::{APP_ID, AppState, CaptureProgress, DataUpdated, Message, State};
+use crate::player_data::{PlayerData, Roster};
+use crate::profiles::{self, Profile};
+use crate::{APP_ID, ActiveProfile, AppState, CaptureProgress, DataUpdated, Message, State};
 
 struct AppStateManager {
     app_state: AppState,
@@ -51,8 +53,33 @@ impl AppStateManager {
         }
     }
 
+    pub fn update_profile(&mut self, profile: Option<ActiveProfile>) {
+        self.app_state.profile = profile;
+        self.app_state.profiles_version += 1;
+        let _ = self.state_tx.send(self.app_state.clone());
+    }
+
+    pub fn update_roster(&mut self, roster: Roster) {
+        self.app_state.roster = std::sync::Arc::new(roster);
+        let _ = self.state_tx.send(self.app_state.clone());
+    }
+
     pub fn update_progress(&mut self, update: impl FnOnce(&mut CaptureProgress)) {
         update(&mut self.app_state.capture_progress);
+        let _ = self.state_tx.send(self.app_state.clone());
+    }
+
+    /// Tells the UI what changed.
+    pub fn push_changes(&mut self, changes: Vec<crate::changes::Change>) {
+        if changes.is_empty() {
+            return;
+        }
+        let id = self.app_state.changes.last().map_or(1, |batch| batch.id + 1);
+        self.app_state
+            .changes
+            .push(crate::changes::ChangeBatch { id, changes });
+        let extra = self.app_state.changes.len().saturating_sub(16);
+        self.app_state.changes.drain(..extra);
         let _ = self.state_tx.send(self.app_state.clone());
     }
 
@@ -73,6 +100,20 @@ const CAPTURE_RETRY_MAX: Duration = Duration::from_secs(15);
 /// A capture that ran at least this long is not counted as a quick failure.
 const CAPTURE_STABLE_AFTER: Duration = Duration::from_secs(10);
 
+/// What was captured from the game in a connection.
+#[derive(Clone, Copy, Default)]
+struct Captured {
+    items: bool,
+    characters: bool,
+    achievements: bool,
+}
+
+impl Captured {
+    fn all(self) -> bool {
+        self.items && self.characters && self.achievements
+    }
+}
+
 enum CaptureStatus {
     Running,
     Error(String),
@@ -86,6 +127,17 @@ pub struct Monitor {
     keys: HashMap<u16, Vec<u8>>,
     /// When the capture progress of the latest connection to the game began.
     session_started: Option<Instant>,
+    /// The account of the latest connection to the game, once it is known.
+    session_uid: Option<u32>,
+    session_nickname: Option<String>,
+    /// What was captured in the latest connection.
+    captured: Captured,
+    /// There is captured data that is not stored yet, and when it came.
+    unsaved: bool,
+    last_data: Option<Instant>,
+    /// The account the data held for the exports belongs to.
+    active_uid: Option<u32>,
+    active_nickname: Option<String>,
     timeline: DebugTimeline,
     sniffer: GameSniffer,
     capture_cancel_token: Option<CancellationToken>,
@@ -94,6 +146,9 @@ pub struct Monitor {
     status_tx: mpsc::UnboundedSender<CaptureStatus>,
     status_rx: mpsc::UnboundedReceiver<CaptureStatus>,
     capture_backend: BackendType,
+    /// Whether the mora has been seen in the latest connection: the first time
+    /// is what there was at login, not a change.
+    mora_seen_in_session: bool,
 }
 
 impl Monitor {
@@ -118,6 +173,13 @@ impl Monitor {
             log_packet_rx,
             keys,
             session_started: None,
+            session_uid: None,
+            session_nickname: None,
+            captured: Captured::default(),
+            unsaved: false,
+            last_data: None,
+            active_uid: None,
+            active_nickname: None,
             timeline: DebugTimeline::new(),
             sniffer,
             capture_cancel_token: None,
@@ -126,15 +188,20 @@ impl Monitor {
             status_tx,
             status_rx,
             capture_backend,
+            mora_seen_in_session: false,
         })
     }
 
     pub async fn run(mut self) {
         self.app_state.update_app_state(State::Main);
 
+        // Data that stays unsaved because not everything came is stored
+        // after a while.
+        let mut tick = tokio::time::interval(Duration::from_secs(2));
         loop {
             #[rustfmt::skip]
                 tokio::select! {
+                    _ = tick.tick() => self.save_if_settled(),
                     Some(packet) = self.packet_rx.recv() => self.handle_packet(packet),
                     Some(status) = self.status_rx.recv() => self.handle_capture_status(status),
                     Some(msg) = self.ui_message_rx.recv() => self.handle_ui_msg(msg),
@@ -178,12 +245,161 @@ impl Monitor {
             Message::ExportAchievements(reply_tx) => {
                 let _ = reply_tx.send(self.player_data.export_achievements());
             }
-            Message::DebugMark(label) => self.record(format!("MARK: {label}")),
+            Message::DebugMark(label) => {
+                crate::probe::note(&label);
+                self.record(format!("MARK: {label}"));
+            }
+            Message::SelectProfile(uid) => {
+                // An account that has nothing stored (any more) is not one
+                // to use.
+                let stored = uid.is_some_and(|uid| matches!(Profile::load(uid), Ok(Some(_))));
+                self.select_profile(uid.filter(|_| stored));
+                self.record(format!("selected profile {uid:?}"));
+            }
+            Message::DeleteProfile(uid) => {
+                if let Err(e) = profiles::delete(uid) {
+                    tracing::error!("unable to delete the profile {uid}: {e:#}");
+                }
+                if self.active_uid == Some(uid) {
+                    self.select_profile(None);
+                } else {
+                    let profile = self.active_profile();
+                    self.app_state.update_profile(profile);
+                }
+                self.record(format!("deleted profile {uid}"));
+            }
             Message::FinishedAchievements(reply_tx) => {
                 let _ = reply_tx.send(self.player_data.finished_achievement_ids());
             }
             _ => (),
         }
+    }
+
+    fn active_profile(&self) -> Option<ActiveProfile> {
+        self.active_uid.map(|uid| ActiveProfile {
+            uid,
+            nickname: self.active_nickname.clone(),
+        })
+    }
+
+    /// A new connection to the game: what was captured in the last one is
+    /// stored, and the account is not known until the game tells.
+    fn start_account_session(&mut self) {
+        if self.unsaved {
+            self.save_session();
+        }
+        self.session_uid = None;
+        self.session_nickname = None;
+        self.captured = Captured::default();
+        self.last_data = None;
+    }
+
+    /// Makes the stored data of `uid` the one the exports use, or none.
+    fn select_profile(&mut self, uid: Option<u32>) {
+        self.active_uid = uid;
+        self.active_nickname = None;
+        let stored = uid.map(Profile::load);
+        match stored {
+            Some(Ok(Some(profile))) => {
+                self.active_nickname = profile.nickname.clone();
+                self.player_data.load_profile(&profile);
+            }
+            Some(Err(e)) => {
+                tracing::error!("unable to load the profile: {e:#}");
+                self.player_data.clear();
+            }
+            Some(Ok(None)) | None => self.player_data.clear(),
+        }
+
+        // What there is now counts as what was received.
+        let now = Instant::now();
+        let (items, characters, achievements) = self.player_data.availability();
+        let mut updated = self.app_state.app_state.updated.clone();
+        updated.items_updated = items.then_some(now);
+        updated.characters_updated = characters.then_some(now);
+        updated.achievements_updated = achievements.then_some(now);
+        self.app_state.update_timestamps(updated);
+
+        let profile = self.active_profile();
+        self.app_state.update_profile(profile);
+        self.publish_roster();
+    }
+
+    fn publish_roster(&mut self) {
+        let roster = self.player_data.roster();
+        self.app_state.update_roster(roster);
+    }
+
+    /// Before data captured in this connection is taken: if it is of another
+    /// account than the data held, that is replaced by the stored data of it,
+    /// so nothing of two accounts gets mixed.
+    fn switch_to_session_account(&mut self) {
+        if self.session_uid == self.active_uid {
+            return;
+        }
+        self.select_profile(self.session_uid);
+        if let Some(name) = &self.session_nickname {
+            self.active_nickname = Some(name.clone());
+        }
+        self.record(format!("data is of account {:?}", self.session_uid));
+    }
+
+    fn save_if_settled(&mut self) {
+        let settled = self
+            .last_data
+            .is_some_and(|at| at.elapsed() > Duration::from_secs(6));
+        if self.unsaved && settled {
+            self.save_session();
+        }
+    }
+
+    /// Stores what was captured in this connection in the file of the account.
+    fn save_session(&mut self) {
+        self.unsaved = false;
+        let Some(uid) = self.session_uid else {
+            self.record("captured data is not stored: the account is not known");
+            return;
+        };
+        if self.active_uid != Some(uid) {
+            return;
+        }
+
+        let mut profile = match Profile::load(uid) {
+            Ok(profile) => profile.unwrap_or_default(),
+            Err(e) => {
+                tracing::warn!("replacing a profile that can't be read: {e:#}");
+                Profile::default()
+            }
+        };
+        profile.uid = uid;
+        let captured = self.captured;
+        self.player_data.fill_profile(
+            &mut profile,
+            captured.items,
+            captured.characters,
+            captured.achievements,
+        );
+        if let Some(name) = &self.session_nickname {
+            profile.nickname = Some(name.clone());
+        }
+
+        match profile.save() {
+            Ok(()) => {
+                let summary = profile.summary();
+                self.record(format!(
+                    "stored profile {uid} ({} items, {} characters, {} achievements)",
+                    summary.items, summary.characters, summary.achievements
+                ));
+            }
+            Err(e) => {
+                tracing::error!("unable to store the profile {uid}: {e:#}");
+                self.record(format!("unable to store the profile {uid}"));
+                return;
+            }
+        }
+        self.active_nickname = profile.nickname.clone();
+        let active = self.active_profile();
+        self.app_state.update_profile(active);
     }
 
     fn handle_capture_status(&mut self, status: CaptureStatus) {
@@ -216,12 +432,27 @@ impl Monitor {
             self.timeline.record(event.to_string());
             match event {
                 SnifferEvent::UndecryptedSample(bytes) => self.timeline.save_sample(&bytes),
+                SnifferEvent::PlayerUid(uid) => self.session_uid = Some(uid),
+                // Only a fallback: the token response is the better source.
+                SnifferEvent::HeaderUserId(uid) => {
+                    if self.session_uid.is_none() && (100_000_000..=999_999_999).contains(&uid) {
+                        self.session_uid = Some(uid);
+                    }
+                }
+                SnifferEvent::PlayerNickname(name) => {
+                    self.session_nickname = Some(name);
+                    if self.session_uid.is_some() {
+                        self.unsaved = true;
+                        self.last_data = Some(Instant::now());
+                    }
+                }
                 SnifferEvent::HandshakeRequested => {
                     // The game sends a burst of these for one connection.
                     let new_connection = self
                         .session_started
                         .is_none_or(|at| at.elapsed() > Duration::from_secs(3));
                     if new_connection {
+                        self.start_account_session();
                         self.session_started = Some(Instant::now());
                         self.app_state.update_progress(|progress| {
                             *progress = CaptureProgress {
@@ -274,6 +505,7 @@ impl Monitor {
         let commands = match received {
             Some(GamePacket::Commands(commands)) => commands,
             Some(GamePacket::Connection(ConnectionPacket::HandshakeRequested)) => {
+                self.mora_seen_in_session = false;
                 self.player_data.start_session();
                 return;
             }
@@ -286,6 +518,7 @@ impl Monitor {
         let mut has_new_data = false;
 
         for command in commands {
+            crate::probe::observe(command.command_id, &command.proto_data);
             let _span = tracing::info_span!("packet id {}", command.command_id);
             if log_packets {
                 if let Err(e) = log_command(&command) {
@@ -293,10 +526,130 @@ impl Monitor {
                 }
             }
 
+            // What the game says about the player, for the log, so that what is
+            // read from it can be checked.
+            if let Some(props) = guarded("player props", || matches_player_props(&command)) {
+                let text: Vec<String> = props.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                tracing::info!("Player properties: {}", text.join(" "));
+            }
+
+            // The mora is not among the items; it comes with the player's
+            // properties, now and each time it changes.
+            if let Some(mora) = guarded("mora", || matches_player_mora(&command)) {
+                if let Some(before) = self.player_data.process_mora(mora) {
+                    self.switch_to_session_account();
+                    tracing::info!("Found mora: {mora}");
+                    self.record(format!("FOUND mora {mora}"));
+                    self.unsaved = true;
+                    has_new_data = true;
+                    // Not the first time in this connection: it was spent or earned.
+                    if self.mora_seen_in_session
+                        && let Some(before) = before
+                    {
+                        self.app_state.push_changes(vec![crate::changes::Change {
+                            kind: crate::changes::ChangeKind::Mora,
+                            delta: mora as i64 - before as i64,
+                        }]);
+                    }
+                }
+                self.mora_seen_in_session = true;
+            }
+
+            // A stack of materials that changed, as the game says it in a small
+            // message: what there is now.  Taken in even before the lists, which
+            // it is not, being at most a few items.
+            if let Some(updates) = guarded("item changes", || matches_item_changes(&command))
+                && updates.iter().all(|item| self.player_data.knows_item(item.item_id))
+            {
+                let applied = self.player_data.apply_item_changes(&updates);
+                let changes = applied.stacks;
+                let weapons = applied.weapons;
+                if !changes.is_empty() || !weapons.is_empty() {
+                    self.switch_to_session_account();
+                    let weapon_ids: Vec<u32> = weapons.iter().map(|weapon| weapon.item_id).collect();
+                    self.record(format!("FOUND item changes: {changes:?} weapons {weapon_ids:?}"));
+                    self.unsaved = true;
+                    has_new_data = true;
+                    // Said only when the full list of this connection is in, so
+                    // that what is shown was a change and not a correction.
+                    if self.captured.items {
+                        let mut shown: Vec<crate::changes::Change> = changes
+                            .into_iter()
+                            .map(|(id, delta)| crate::changes::Change {
+                                kind: crate::changes::ChangeKind::Item(id),
+                                delta,
+                            })
+                            .collect();
+                        for weapon in &weapons {
+                            if weapon.leveled {
+                                shown.push(crate::changes::Change {
+                                    kind: crate::changes::ChangeKind::Weapon(weapon.item_id),
+                                    delta: weapon.level as i64,
+                                });
+                            }
+                            if weapon.refined {
+                                shown.push(crate::changes::Change {
+                                    kind: crate::changes::ChangeKind::Refinement(weapon.item_id),
+                                    delta: weapon.refinement as i64,
+                                });
+                            }
+                        }
+                        self.app_state.push_changes(shown);
+                    }
+                }
+                continue;
+            }
+
+            // A talent that went up a level.
+            if let Some(update) = guarded("talent", || matches_talent_level(&command))
+                && let Some((avatar, skill, level)) = self.player_data.apply_talent_level(&update)
+            {
+                self.record(format!("FOUND talent {skill} of {avatar} at {level}"));
+                self.unsaved = true;
+                has_new_data = true;
+                if self.captured.characters {
+                    self.app_state.push_changes(vec![crate::changes::Change {
+                        kind: crate::changes::ChangeKind::Talent(avatar, skill),
+                        delta: level as i64,
+                    }]);
+                }
+                continue;
+            }
+
+            // A character's level, experience or ascension that changed, and the
+            // stats that go with it.
+            if let Some(update) = guarded("avatar props", || matches_avatar_props(&command))
+                && let Some((id, level)) = self
+                    .player_data
+                    .apply_avatar_props(&update.guids, &update.props)
+            {
+                self.record(format!("FOUND avatar {id} props {:?}", update.props));
+                self.unsaved = true;
+                has_new_data = true;
+                if self.captured.characters
+                    && let Some(level) = level
+                {
+                    self.app_state.push_changes(vec![crate::changes::Change {
+                        kind: crate::changes::ChangeKind::Level(id),
+                        delta: level as i64,
+                    }]);
+                }
+                continue;
+            }
+            if let Some((guids, stats)) = guarded("avatar stats", || matches_avatar_stats(&command))
+                && self.player_data.apply_avatar_stats(&guids, &stats)
+            {
+                self.unsaved = true;
+                has_new_data = true;
+                continue;
+            }
+
             // Avatars are matched first: they are strict about what they accept,
             // while an item match is looser and could claim an avatar list.
             if let Some(avatars) = guarded("avatar packet", || matches_avatar_packet(&command)) {
+                self.switch_to_session_account();
                 if self.player_data.process_characters(&avatars) {
+                    self.captured.characters = true;
                     tracing::info!("Found avatar packet with {} avatars", avatars.len());
                     self.record(format!("FOUND avatar packet, {} avatars", avatars.len()));
                     updated.characters_updated = Some(Instant::now());
@@ -306,7 +659,9 @@ impl Monitor {
                     self.record(format!("ignored partial avatar list, {}", avatars.len()));
                 }
             } else if let Some(items) = guarded("item packet", || matches_item_packet(&command)) {
+                self.switch_to_session_account();
                 if self.player_data.process_items(&items) {
+                    self.captured.items = true;
                     tracing::info!("Found item packet with {} items", items.len());
                     self.record(format!("FOUND item packet, {} items", items.len()));
                     updated.items_updated = Some(Instant::now());
@@ -327,7 +682,9 @@ impl Monitor {
                     "FOUND achievement packet, {} achievements",
                     achievements.len()
                 ));
+                self.switch_to_session_account();
                 self.player_data.process_achievements(&achievements);
+                self.captured.achievements = true;
                 updated.achievements_updated = Some(Instant::now());
                 self.app_state.update_progress(|progress| progress.achievements = true);
                 has_new_data = true;
@@ -335,6 +692,12 @@ impl Monitor {
         }
 
         if has_new_data {
+            self.publish_roster();
+            self.unsaved = true;
+            self.last_data = Some(Instant::now());
+            if self.captured.all() {
+                self.save_session();
+            }
             // Data is arriving, so whatever went wrong earlier is over.
             self.app_state.update_capture_error(None);
             self.app_state.update_timestamps(updated);

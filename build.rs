@@ -57,7 +57,16 @@ async fn main() -> io::Result<()> {
     let cache_path = Path::new(&out_dir).join("game_data.json");
 
     let mut db = anime_game_data::AnimeGameData::new_with_cache(&cache_path);
-    let db_updated = db.needs_update().await.unwrap();
+    let db_updated = match db.needs_update().await {
+        Ok(updated) => updated,
+        // Not being able to ask must not stop a build that has the data from
+        // an earlier one.
+        Err(e) if Path::new(&out_dir).join("game_data.gz").exists() => {
+            println!("cargo::warning=unable to check for new game data, using the old: {e}");
+            false
+        }
+        Err(e) => panic!("unable to check for game data: {e}"),
+    };
     if db_updated {
         db.update().await.unwrap();
         let out_path = Path::new(&out_dir).join("game_data.gz");

@@ -52,7 +52,9 @@ log = "0.4.27"
 notify = "5.2.0"
 open = "5.3.2"
 pcap = { version = "2.3.0", features = ["capture-stream"], optional = true }
+protobuf = "3.7.1"
 regex = "1.11.2"
+image = { version = "0.25", default-features = false, features = ["png", "webp"] }
 reqwest = { version = "0.12.23", features = ["gzip", "stream"] }
 self_update = "0.42.0"
 serde = { version = "1.0.219", features = ["derive"] }
@@ -67,8 +69,12 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 tray-icon = "0.26.1"
 pktmon = { version = "0.6.2", features = ["tokio"] }
 windows = { version = "0.61.3", features = [
+	"Win32_Foundation",
 	"Win32_System_Console",
+	"Win32_System_Diagnostics_ToolHelp",
+	"Win32_UI_Input_KeyboardAndMouse",
 	"Win32_System_Registry",
+	"Win32_System_Threading",
 	"Win32_Graphics_Gdi",
 	"Win32_UI_HiDpi",
 	"Win32_UI_Shell",

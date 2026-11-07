@@ -1,7 +1,7 @@
 //! Achievement tracker tab: browse every achievement, filter them and mark the
 //! ones you have finished, either by hand or by syncing from captured game data.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::mpsc as std_mpsc;
 use std::thread;
 
@@ -14,14 +14,14 @@ use egui_notify::Toasts;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::Message;
+use crate::{ActiveProfile, Message};
 use crate::achievement_data::{self, Achievement, AchievementDb, Language, UpdateOutcome};
 
-const PILL: Color32 = Color32::from_rgb(0x1c, 0x1e, 0x3d);
-const CARD: Color32 = Color32::from_rgb(0x2b, 0x2f, 0x5e);
-const CARD_SELECTED: Color32 = Color32::from_rgb(0x4a, 0x7b, 0xff);
-const DIM: Color32 = Color32::from_rgb(0x6a, 0x6e, 0x95);
-const PRIMOGEM: Color32 = Color32::from_rgb(0x7f, 0xc8, 0xff);
+pub(crate) const PILL: Color32 = Color32::from_rgb(0x1c, 0x1e, 0x3d);
+pub(crate) const CARD: Color32 = Color32::from_rgb(0x2b, 0x2f, 0x5e);
+pub(crate) const CARD_SELECTED: Color32 = Color32::from_rgb(0x4a, 0x7b, 0xff);
+pub(crate) const DIM: Color32 = Color32::from_rgb(0x6a, 0x6e, 0x95);
+pub(crate) const PRIMOGEM: Color32 = Color32::from_rgb(0x7f, 0xc8, 0xff);
 
 /// Window size used while the tracker tab is open.
 pub const TAB_WINDOW_SIZE: egui::Vec2 = egui::vec2(1100., 720.);
@@ -37,6 +37,11 @@ pub struct AchievementProgress {
     pub only_unfinished: bool,
     /// The header counters show what is left instead of what is done.
     pub show_remaining: bool,
+    /// The marks of the accounts other than the one shown, which are in
+    /// `done`.
+    pub by_profile: BTreeMap<u32, BTreeSet<u32>>,
+    /// The account `done` belongs to; 0 while none is known.
+    pub profile: u32,
 }
 
 impl Default for AchievementProgress {
@@ -46,7 +51,28 @@ impl Default for AchievementProgress {
             language: Language::default(),
             only_unfinished: false,
             show_remaining: false,
+            by_profile: BTreeMap::new(),
+            profile: 0,
         }
+    }
+}
+
+impl AchievementProgress {
+    /// Shows the marks of another account, keeping the ones of this.
+    pub fn switch_profile(&mut self, uid: u32) {
+        if uid == self.profile {
+            return;
+        }
+        let shown = std::mem::take(&mut self.done);
+        if self.profile == 0 && !self.by_profile.contains_key(&uid) {
+            // Marks made before accounts were told apart belong to the first
+            // one that turns up.
+            self.done = shown;
+        } else {
+            self.by_profile.insert(self.profile, shown);
+            self.done = self.by_profile.remove(&uid).unwrap_or_default();
+        }
+        self.profile = uid;
     }
 }
 
@@ -135,7 +161,7 @@ fn load_db(language: Language) -> Option<AchievementDb> {
 
 /// Lays out `text` on a single line, eliding it with an ellipsis if it does
 /// not fit in `width`.
-fn elided(
+pub(crate) fn elided(
     ui: &egui::Ui,
     text: &str,
     font: FontId,
@@ -317,6 +343,7 @@ impl AchievementTab {
         ui: &mut egui::Ui,
         progress: &mut AchievementProgress,
         can_sync: bool,
+        account: Option<&ActiveProfile>,
         ui_message_tx: &mpsc::UnboundedSender<Message>,
         toasts: &mut Toasts,
     ) {
@@ -460,7 +487,20 @@ impl AchievementTab {
                 });
             });
         });
-        ui.add_space(6.);
+        let account_text = match account {
+            Some(ActiveProfile {
+                uid,
+                nickname: Some(name),
+            }) => format!("{name} ({uid})"),
+            Some(ActiveProfile { uid, nickname: None }) => uid.to_string(),
+            None => tr("not known yet", "пока не известен").to_owned(),
+        };
+        ui.label(
+            RichText::new(format!("{} {account_text}", tr("Account:", "Аккаунт:")))
+                .size(13.)
+                .color(DIM),
+        );
+        ui.add_space(4.);
 
         // What is left per version and per type.  Each list is counted with the
         // other filters applied but not its own, so its options show what
@@ -784,5 +824,49 @@ impl AchievementTab {
         );
         // Make sure the parent layout continues below the taller of the sides.
         ui.advance_cursor_after_rect(right_rect.union(left.response.rect));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn marks(ids: &[u32]) -> BTreeSet<u32> {
+        ids.iter().copied().collect()
+    }
+
+    #[test]
+    fn marks_made_before_accounts_belong_to_the_first_one() {
+        let mut progress = AchievementProgress::default();
+        progress.done = marks(&[1, 2, 3]);
+
+        progress.switch_profile(700_000_001);
+        assert_eq!(progress.done, marks(&[1, 2, 3]));
+        assert_eq!(progress.profile, 700_000_001);
+    }
+
+    #[test]
+    fn each_account_keeps_its_own_marks() {
+        let mut progress = AchievementProgress::default();
+        progress.switch_profile(1);
+        progress.done = marks(&[10, 20]);
+
+        progress.switch_profile(2);
+        assert!(progress.done.is_empty(), "another account starts with nothing");
+        progress.done = marks(&[30]);
+
+        progress.switch_profile(1);
+        assert_eq!(progress.done, marks(&[10, 20]));
+        progress.switch_profile(2);
+        assert_eq!(progress.done, marks(&[30]));
+    }
+
+    #[test]
+    fn switching_to_the_same_account_changes_nothing() {
+        let mut progress = AchievementProgress::default();
+        progress.switch_profile(5);
+        progress.done = marks(&[1]);
+        progress.switch_profile(5);
+        assert_eq!(progress.done, marks(&[1]));
     }
 }

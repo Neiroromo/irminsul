@@ -13,8 +13,9 @@ use egui::{
     ViewportBuilder, ViewportCommand, ViewportId, pos2, vec2,
 };
 
-use crate::CaptureProgress;
+use crate::{CaptureProgress, DataUpdated};
 use crate::achievement_data::Language;
+use crate::window_visibility;
 
 const WIDTH: f32 = 440.;
 const HEIGHT: f32 = 132.;
@@ -61,8 +62,8 @@ pub struct CapturePopup {
     /// How full each ring is drawn, easing towards where the capture is.
     fill: [f32; 3],
     last_frame: Instant,
-    /// Whether the popup's window got its rounded corners yet.
-    rounded: bool,
+    /// What the corners of the popup's window were cut for.
+    region: Option<(i32, i32, u32)>,
     /// A made up connection being shown, and whether it is to fail.
     preview: Option<(Instant, bool)>,
     previews: u64,
@@ -87,7 +88,7 @@ impl CapturePopup {
             closing_at: None,
             fill: [0.; 3],
             last_frame: Instant::now(),
-            rounded: false,
+            region: None,
             preview: None,
             previews: 0,
         }
@@ -124,6 +125,7 @@ impl CapturePopup {
         &mut self,
         ctx: &Context,
         progress: &CaptureProgress,
+        updated: &DataUpdated,
         language: Language,
         enabled: bool,
     ) {
@@ -141,14 +143,22 @@ impl CapturePopup {
                 self.finished_at = None;
                 self.closing_at = None;
                 self.fill = [0.; 3];
-                self.rounded = false;
+                self.region = None;
             }
         }
         let Some(shown_at) = self.shown_at else {
             return;
         };
 
-        let done = [progress.items, progress.characters, progress.achievements];
+        // Items, characters and achievements are done when the Export tab says
+        // they were synced in this connection, as well as when the capture says
+        // so.
+        let synced = |at: Option<Instant>| at.is_some_and(|at| at >= shown_at);
+        let done = [
+            progress.items || synced(updated.items_updated),
+            progress.characters || synced(updated.characters_updated),
+            progress.achievements || synced(updated.achievements_updated),
+        ];
         let all_done = done.iter().all(|done| *done);
         let failed = progress.failed && !all_done;
 
@@ -216,10 +226,9 @@ impl CapturePopup {
         };
 
         // The window comes into being by the call below, so it can be rounded
-        // from the next frame on.
-        if !self.rounded {
-            self.rounded = round_corners();
-        }
+        // from the next frame on.  It is checked every frame, so that the
+        // corners stay cut whatever the window does.
+        window_visibility::round_window("Irminsul capture", CORNER_RADIUS, &mut self.region);
 
         let x = (Self::screen_width(ctx) - WIDTH) / 2.;
         ctx.show_viewport_immediate(
@@ -261,45 +270,6 @@ impl CapturePopup {
         ctx.input(|input| input.viewport().monitor_size)
             .map_or(1920., |size| size.x)
     }
-}
-
-/// Cuts the corners of the popup's window.  The window can't be transparent
-/// where the card is rounded, so the corners are taken off the window itself.
-/// Returns whether it was done.
-#[cfg(windows)]
-fn round_corners() -> bool {
-    use windows::Win32::Foundation::RECT;
-    use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
-    use windows::Win32::UI::HiDpi::GetDpiForSystem;
-    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowRect};
-    use windows::core::{PCWSTR, w};
-
-    unsafe {
-        let Ok(hwnd) = FindWindowW(PCWSTR::null(), w!("Irminsul capture")) else {
-            return false;
-        };
-        let mut rect = RECT::default();
-        if GetWindowRect(hwnd, &mut rect).is_err() {
-            return false;
-        }
-        let scale = GetDpiForSystem() as f32 / 96.;
-        let diameter = (2. * CORNER_RADIUS * scale).round() as i32;
-        let region = CreateRoundRectRgn(
-            0,
-            0,
-            rect.right - rect.left + 1,
-            rect.bottom - rect.top + 1,
-            diameter,
-            diameter,
-        );
-        // The window owns the region from here on.
-        SetWindowRgn(hwnd, Some(region), true) != 0
-    }
-}
-
-#[cfg(not(windows))]
-fn round_corners() -> bool {
-    true
 }
 
 fn mix(from: Color32, to: Color32, t: f32) -> Color32 {

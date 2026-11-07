@@ -90,3 +90,48 @@ pub fn set_visible(visible: bool) {
 
 #[cfg(not(windows))]
 pub fn set_visible(_visible: bool) {}
+
+
+/// Cuts the corners of the window with this title to the radius (in points), as
+/// the window is now: its size and the screen's scale are read from it, each
+/// time this is called, and the cut is made again when either has changed.  The
+/// window cannot be see-through where a card on it is rounded, so the corners
+/// are taken off the window itself.  `last` remembers what the cut was made
+/// for.  Returns whether the window is cut.
+#[cfg(windows)]
+pub fn round_window(title: &str, radius: f32, last: &mut Option<(i32, i32, u32)>) -> bool {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
+    use windows::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowRect};
+    use windows::core::{HSTRING, PCWSTR};
+
+    unsafe {
+        let title = HSTRING::from(title);
+        let Ok(window) = FindWindowW(PCWSTR::null(), &title) else {
+            return false;
+        };
+        let mut rect = RECT::default();
+        if GetWindowRect(window, &mut rect).is_err() {
+            return false;
+        }
+        let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+        let dpi = GetDpiForWindow(window).max(96);
+        if *last == Some((width, height, dpi)) {
+            return true;
+        }
+        let diameter = (2. * radius * dpi as f32 / 96.).round() as i32;
+        let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, diameter, diameter);
+        // The window owns the region from here on.
+        let done = SetWindowRgn(window, Some(region), true) != 0;
+        if done {
+            *last = Some((width, height, dpi));
+        }
+        done
+    }
+}
+
+#[cfg(not(windows))]
+pub fn round_window(_title: &str, _radius: f32, _last: &mut Option<(i32, i32, u32)>) -> bool {
+    true
+}

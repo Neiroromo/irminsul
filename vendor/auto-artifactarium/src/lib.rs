@@ -61,6 +61,11 @@ use protobuf::Message as _;
 use protobuf::UnknownValueRef;
 use crate::kcp::KcpSniffer;
 pub use crate::unk_util::Achievement;
+use crate::unk_util::{
+    find_player_mora, find_player_nickname, find_player_props, find_player_uid, matches_avatar_fight_props,
+    matches_avatar_prop_update, matches_item_update, matches_talent_update,
+};
+pub use crate::unk_util::{AvatarPropUpdate, TalentUpdate};
 pub use crate::unk_util::{
     matches_achievement_all_data_notify, matches_avatars_all_data_notify,
     matches_get_player_token_rsp, matches_items_all_data_notify,
@@ -237,6 +242,12 @@ pub enum SnifferEvent {
     /// A command that could not be decrypted, kept for finding out why.
     UndecryptedSample(Vec<u8>),
     SessionKeyLost,
+    /// The player id found in the server's answer to the token request.
+    PlayerUid(u32),
+    /// The user id the header of the packets carries, if it is not zero.
+    HeaderUserId(u32),
+    /// The player's name, found in the data sent when logging in.
+    PlayerNickname(String),
     /// The server's answer to the token request arrived, but the seed could not
     /// be read from it, so no session key can be derived.
     TokenResponseUnreadable {
@@ -295,6 +306,9 @@ impl fmt::Display for SnifferEvent {
                 write!(f, "saved a sample of {} undecryptable bytes", bytes.len())
             }
             Self::SessionKeyLost => write!(f, "session key stopped working"),
+            Self::PlayerUid(uid) => write!(f, "player id {uid} (from the token response)"),
+            Self::HeaderUserId(uid) => write!(f, "packet header user id {uid}"),
+            Self::PlayerNickname(name) => write!(f, "player name {name:?}"),
             Self::TokenResponseUnreadable {
                 body_len,
                 declared_size,
@@ -327,6 +341,8 @@ pub struct GameSniffer {
     events: Vec<SnifferEvent>,
     /// Whether the token response of the current connection was read.
     seeds_in_connection: bool,
+    nickname_found: bool,
+    header_uid_seen: bool,
     /// The key search of this connection came up empty.
     key_search_failed: bool,
     samples_saved: u32,
@@ -389,6 +405,8 @@ impl GameSniffer {
                 self.events.push(SnifferEvent::HandshakeRequested);
                 self.seeds_in_connection = false;
                 self.key_search_failed = false;
+                self.nickname_found = false;
+                self.header_uid_seen = false;
                 self.samples_saved = 0;
                 self.recv_kcp = None;
                 self.sent_kcp = None;
@@ -571,6 +589,22 @@ impl GameSniffer {
             });
         }
 
+        let split = (command.header_len as usize).min(command.proto_data.len());
+        if !self.header_uid_seen
+            && let Ok(head) = PacketHead::parse_from_bytes(&command.proto_data[..split])
+            && head.user_id != 0
+        {
+            self.header_uid_seen = true;
+            self.events.push(SnifferEvent::HeaderUserId(head.user_id));
+        }
+        if !self.nickname_found
+            && command.data_len < 8000
+            && let Some(name) = find_player_nickname(&command.proto_data[split..])
+        {
+            self.nickname_found = true;
+            self.events.push(SnifferEvent::PlayerNickname(name));
+        }
+
         let span = info_span!("command", ?command);
         let _enter = span.enter();
 
@@ -598,6 +632,10 @@ impl GameSniffer {
                     count: self.possible_seeds.len(),
                     sent_time: header_command.sent_ms,
                 });
+                let split = (command.header_len as usize).min(command.proto_data.len());
+                if let Some(uid) = find_player_uid(&command.proto_data[split..]) {
+                    self.events.push(SnifferEvent::PlayerUid(uid));
+                }
                 info!(?self.sent_time, "setting new send time");
             } else if !self.seeds_in_connection && command.data_len >= 5000 {
                 // The first large command of a connection is the token
@@ -638,6 +676,36 @@ pub fn matches_achievement_packet(game_command: &GameCommand) -> Option<Vec<Achi
 /// Matches the full item list by content, whatever its command id is.
 pub fn matches_item_packet(game_command: &GameCommand) -> Option<Vec<r#gen::protos::Item>> {
     matches_items_all_data_notify(&game_command.proto_data)
+}
+
+/// The properties of a character that changed, if the command says so.
+pub fn matches_avatar_props(game_command: &GameCommand) -> Option<AvatarPropUpdate> {
+    matches_avatar_prop_update(&game_command.proto_data)
+}
+
+/// A talent that went up a level, if the command says so.
+pub fn matches_talent_level(game_command: &GameCommand) -> Option<TalentUpdate> {
+    matches_talent_update(&game_command.proto_data)
+}
+
+/// The stats of a character that changed, if the command says so.
+pub fn matches_avatar_stats(game_command: &GameCommand) -> Option<(Vec<u64>, Vec<(u32, f32)>)> {
+    matches_avatar_fight_props(&game_command.proto_data)
+}
+
+/// The stacks of materials that changed, if the command says so.
+pub fn matches_item_changes(game_command: &GameCommand) -> Option<Vec<r#gen::protos::Item>> {
+    matches_item_update(&game_command.proto_data)
+}
+
+/// All the player's properties, if the command is the message that has them.
+pub fn matches_player_props(game_command: &GameCommand) -> Option<Vec<(u64, u64)>> {
+    find_player_props(&game_command.proto_data)
+}
+
+/// The player's mora, if the command has it.
+pub fn matches_player_mora(game_command: &GameCommand) -> Option<u64> {
+    find_player_mora(&game_command.proto_data)
 }
 
 /// Matches the full avatar list by content, whatever its command id is.

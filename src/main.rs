@@ -22,13 +22,25 @@ mod app;
 mod autostart;
 mod capture;
 mod capture_popup;
+mod changes;
+mod changes_popup;
 mod debug_timeline;
 mod good;
+mod game_launch;
+mod icons;
+mod live_data;
+mod overlay;
+mod planner_tab;
+mod probe;
 mod monitor;
 mod player_data;
+mod profiles;
+mod roster_tab;
 mod tray;
 mod window_visibility;
 mod update;
+mod upgrade_data;
+mod upgrade_store;
 mod wish;
 
 const APP_ID: &str = "Irminsul";
@@ -68,6 +80,9 @@ pub enum Message {
     FinishedAchievements(oneshot::Sender<Vec<u32>>),
     /// A marker for the debug timeline, e.g. "Door clicked".
     DebugMark(String),
+    /// Use the stored data of an account (or none) for the exports.
+    SelectProfile(Option<u32>),
+    DeleteProfile(u32),
 }
 
 #[derive(Clone, Debug)]
@@ -93,6 +108,13 @@ impl Default for DataUpdated {
     }
 }
 
+/// The game account whose data the exports use.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActiveProfile {
+    pub uid: u32,
+    pub nickname: Option<String>,
+}
+
 /// How far capturing the data of the current connection to the game has come.
 #[derive(Clone, Debug, Default)]
 pub struct CaptureProgress {
@@ -114,7 +136,15 @@ pub struct AppState {
     capture_error: Option<String>,
     /// The latest debug timeline lines.
     debug_events: Vec<String>,
+    /// What changed while playing, the latest few batches.
+    changes: Vec<changes::ChangeBatch>,
     capture_progress: CaptureProgress,
+    /// The account the data belongs to, if it is known.
+    profile: Option<ActiveProfile>,
+    /// Counts the changes to the stored profiles.
+    profiles_version: u64,
+    /// What the account in use has, to show.
+    roster: std::sync::Arc<player_data::Roster>,
     updated: DataUpdated,
 }
 
@@ -125,7 +155,11 @@ impl AppState {
             capturing: false,
             capture_error: None,
             debug_events: Vec::new(),
+            changes: Vec::new(),
             capture_progress: CaptureProgress::default(),
+            profile: None,
+            profiles_version: 0,
+            roster: Default::default(),
             updated: DataUpdated::new(),
         }
     }
@@ -215,11 +249,11 @@ fn main() -> eframe::Result {
     let minimized = args.minimized;
     let preview_popup = args.preview_popup;
 
-    let background_image_size = [1600., 1000.];
-
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size(background_image_size.map(|v| v * 0.5))
-        .with_resizable(false)
+        // The same size for every tab; it can be made bigger or smaller.
+        .with_inner_size(achievement_tab::TAB_WINDOW_SIZE)
+        .with_min_inner_size([760., 480.])
+        .with_resizable(true)
         .with_decorations(false)
         .with_icon(
             // NOTE: Adding an icon is optional

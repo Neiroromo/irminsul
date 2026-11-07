@@ -3,25 +3,28 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::thread;
-use std::time::Instant;
 
 use anyhow::{Context as _, Result, anyhow};
 use chrono::Local;
 use egui::{
     Button, Color32, Context, DragValue, Frame, Id, Key, KeyboardShortcut, Margin, Modal,
-    Modifiers, OpenUrl, PointerButton, RichText, Sense, ViewportCommand,
+    Modifiers, PointerButton, RichText, Sense, ViewportBuilder, ViewportCommand, ViewportId,
 };
-use egui_file_dialog::FileDialog;
+use egui_file_dialog::{DialogState, FileDialog};
 use egui_notify::Toasts;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::achievement_tab::{
-    AchievementProgress, AchievementTab, TAB_BACKGROUND, TAB_WINDOW_SIZE,
+    AchievementProgress, AchievementTab, TAB_BACKGROUND,
 };
 use crate::autostart;
 use crate::capture_popup::CapturePopup;
+use crate::changes_popup::ChangesPopup;
+use crate::probe;
 use crate::monitor::Monitor;
+use crate::profiles::{self, ProfileSummary};
+use crate::roster_tab::RosterTab;
 use crate::tray::{Tray, TrayCommand};
 use crate::window_visibility;
 use crate::player_data::ExportSettings;
@@ -42,15 +45,42 @@ pub struct SavedAppState {
     /// Show the progress popup when the game connects and loads data.
     #[serde(default = "default_true")]
     show_capture_popup: bool,
+    /// Show what changed (mora, items) as it happens.
+    #[serde(default = "default_true")]
+    show_changes_popup: bool,
+    /// Numbers the traffic probe looks for.
+    #[serde(default)]
+    probe_needles: String,
+    /// Keep the Power Tools window over all others.
+    #[serde(default)]
+    power_tools_on_top: bool,
+    /// HoYoPlay's launcher program, if HoYoPlay is not where it is installed by
+    /// default.
+    #[serde(default)]
+    hoyoplay_dir: String,
+    /// Hide the window in the tray when the game is started from here.
+    #[serde(default)]
+    minimize_on_launch: bool,
     log_raw_packets: bool,
     #[serde(default)]
     tracing_level: TracingLevel,
     #[serde(default)]
     achievement_progress: AchievementProgress,
+    /// The account whose data the exports used last.
+    #[serde(default)]
+    active_profile: Option<u32>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn window_level(on_top: bool) -> egui::viewport::WindowLevel {
+    if on_top {
+        egui::viewport::WindowLevel::AlwaysOnTop
+    } else {
+        egui::viewport::WindowLevel::Normal
+    }
 }
 
 impl Default for SavedAppState {
@@ -75,20 +105,26 @@ impl Default for SavedAppState {
             auto_start_capture: false,
             close_to_tray: false,
             show_capture_popup: true,
+            show_changes_popup: true,
+            probe_needles: String::new(),
+            power_tools_on_top: false,
+            hoyoplay_dir: String::new(),
+            minimize_on_launch: false,
             log_raw_packets: false,
             tracing_level: Default::default(),
             achievement_progress: Default::default(),
+            active_profile: None,
         }
     }
 }
-
-/// Size of the main window outside of the achievement tracker tab.
-const WINDOW_SIZE: egui::Vec2 = egui::vec2(800., 500.);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MainTab {
     Export,
     Achievements,
+    Characters,
+    Materials,
+    Planner,
 }
 
 #[derive(Clone, Debug)]
@@ -108,7 +144,6 @@ pub struct IrminsulApp {
     toasts: Toasts,
 
     power_tools_open: bool,
-    bug_report_open: bool,
 
     capture_settings_open: bool,
 
@@ -124,8 +159,8 @@ pub struct IrminsulApp {
     achievement_export_target: OptimizerExportTarget,
 
     main_tab: MainTab,
-    window_enlarged: bool,
     achievement_tab: AchievementTab,
+    roster_tab: RosterTab,
 
     restarting: bool,
     /// Set when quitting for real, as opposed to hiding in the tray.
@@ -135,6 +170,24 @@ pub struct IrminsulApp {
     hide_after_start: u8,
     autostart_enabled: bool,
     capture_popup: CapturePopup,
+    changes_popup: ChangesPopup,
+    /// Picking the launcher's program.
+    launcher_dialog: Option<FileDialog>,
+    /// Whether the game is running, and when that was looked at.
+    game_running: bool,
+    game_checked: Option<std::time::Instant>,
+    /// How starting the game through HoYoPlay is going.
+    launch_status: crate::game_launch::SharedStatus,
+    /// What is running and is to be closed before the game is started, and where
+    /// HoYoPlay is, while the user is asked.
+    launch_confirm: Option<(PathBuf, Vec<crate::game_launch::ProcessInfo>)>,
+
+    /// The account of the data in use, as last seen, to notice a change.
+    last_profile_uid: Option<u32>,
+    profiles_open: bool,
+    profile_list: Vec<ProfileSummary>,
+    profiles_seen_version: Option<u64>,
+    profile_delete_confirm: Option<u32>,
 
     saved_state: SavedAppState,
 }
@@ -242,6 +295,7 @@ impl IrminsulApp {
 
         tracing_reload_handle.set_filter(saved_state.tracing_level.get_filter());
         let (log_packets_tx, log_packets_rx) = watch::channel(saved_state.log_raw_packets);
+        probe::set_needles(&saved_state.probe_needles);
         let (ui_message_tx, state_rx, wish_url_rx) =
             start_async_runtime(cc.egui_ctx.clone(), log_packets_rx, capture_backend);
 
@@ -253,6 +307,15 @@ impl IrminsulApp {
         }
 
         let toasts = Toasts::default().with_anchor(egui_notify::Anchor::BottomLeft);
+
+        // Bring back the account that was in use last.
+        let uid = std::env::var("IRMINSUL_SELECT_PROFILE")
+            .ok()
+            .and_then(|uid| uid.parse().ok())
+            .or(saved_state.active_profile);
+        if let Some(uid) = uid {
+            let _ = ui_message_tx.send(Message::SelectProfile(Some(uid)));
+        }
 
         let mut capture_popup = CapturePopup::new();
         if preview_popup {
@@ -266,7 +329,6 @@ impl IrminsulApp {
             tracing_reload_handle,
             toasts,
             power_tools_open: false,
-            bug_report_open: false,
             capture_settings_open: false,
             optimizer_settings_open: false,
             optimizer_export_rx: None,
@@ -277,15 +339,34 @@ impl IrminsulApp {
             achievement_save_dialog: None,
             achievement_save_path: None,
             achievement_export_target: OptimizerExportTarget::None,
-            main_tab: MainTab::Export,
-            window_enlarged: false,
+            // For looking at a tab without a click.
+            main_tab: match std::env::var("IRMINSUL_START_TAB").as_deref() {
+                Ok("achievements") => MainTab::Achievements,
+                Ok("characters") => MainTab::Characters,
+                Ok("materials") => MainTab::Materials,
+                Ok("planner") => MainTab::Planner,
+                _ => MainTab::Export,
+            },
             achievement_tab: AchievementTab::new(),
+            roster_tab: RosterTab::new(&cc.egui_ctx),
             restarting: false,
             quitting: false,
             tray: Tray::new(&cc.egui_ctx),
             hide_after_start: if minimized { 3 } else { 0 },
             autostart_enabled: autostart::is_enabled(),
             capture_popup,
+            changes_popup: ChangesPopup::new(),
+            launcher_dialog: None,
+            game_running: false,
+            game_checked: None,
+            launch_status: Default::default(),
+            launch_confirm: None,
+            last_profile_uid: None,
+            // For looking at the accounts window without a click.
+            profiles_open: std::env::var_os("IRMINSUL_OPEN_PROFILES").is_some(),
+            profile_list: Vec::new(),
+            profiles_seen_version: None,
+            profile_delete_confirm: None,
             state_rx,
             wish_url_rx,
         }
@@ -306,26 +387,21 @@ impl eframe::App for IrminsulApp {
         });
 
         self.handle_tray(ctx);
+        self.follow_profile();
         self.toasts.show(ctx);
         if let Some(optimizer_save_dialog) = &mut self.optimizer_save_dialog {
             optimizer_save_dialog.update(ctx);
+        }
+        if let Some(launcher_dialog) = &mut self.launcher_dialog {
+            launcher_dialog.update(ctx);
         }
         if let Some(achievement_save_dialog) = &mut self.achievement_save_dialog {
             achievement_save_dialog.update(ctx);
         }
 
-        // The achievement tracker needs more room than the main window has.
+        // The tabs other than the export tab draw over a plain background.
         let tracker_open = matches!(self.state_rx.borrow().state, State::Main)
-            && self.main_tab == MainTab::Achievements;
-        if tracker_open != self.window_enlarged {
-            self.window_enlarged = tracker_open;
-            let size = if tracker_open {
-                TAB_WINDOW_SIZE
-            } else {
-                WINDOW_SIZE
-            };
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
-        }
+            && self.main_tab != MainTab::Export;
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
@@ -358,21 +434,15 @@ impl eframe::App for IrminsulApp {
                     }
                 });
 
-                if self.power_tools_open {
-                    let modal = Modal::new(Id::new("Power Tools")).show(ui.ctx(), |ui| {
-                        self.power_tools_modal(ui);
+                // The accounts, which are opened from the title bar, on any tab.
+                if self.profiles_open {
+                    let state = self.state_rx.borrow().clone();
+                    let modal = Modal::new(Id::new("Accounts")).show(ui.ctx(), |ui| {
+                        self.profiles_modal(ui, &state);
                     });
                     if modal.should_close() {
-                        self.power_tools_open = false;
-                    }
-                }
-
-                if self.bug_report_open {
-                    let modal = Modal::new(Id::new("Bug Report")).show(ui.ctx(), |ui| {
-                        self.bug_report_modal(ui);
-                    });
-                    if modal.should_close() {
-                        self.bug_report_open = false;
+                        self.profiles_open = false;
+                        self.profile_delete_confirm = None;
                     }
                 }
 
@@ -380,20 +450,38 @@ impl eframe::App for IrminsulApp {
                     let state = self.state_rx.borrow_and_update().clone();
                     Frame::new()
                         .inner_margin(Margin::symmetric(20, 0))
-                        .show(ui, |ui| {
-                            self.achievement_tab.ui(
+                        .show(ui, |ui| match self.main_tab {
+                            MainTab::Characters => self.roster_tab.characters_ui(
+                                ui,
+                                &state.roster,
+                                &mut self.saved_state.achievement_progress.language,
+                            ),
+                            MainTab::Planner => self.roster_tab.planner_ui(
+                                ui,
+                                &state.roster,
+                                &mut self.saved_state.achievement_progress.language,
+                            ),
+                            MainTab::Materials => self.roster_tab.materials_ui(
+                                ui,
+                                &state.roster,
+                                &mut self.saved_state.achievement_progress.language,
+                            ),
+                            _ => self.achievement_tab.ui(
                                 ui,
                                 &mut self.saved_state.achievement_progress,
                                 state.updated.achievements_updated.is_some(),
+                                state.profile.as_ref(),
                                 &self.ui_message_tx,
                                 &mut self.toasts,
-                            );
+                            ),
                         });
                     return;
                 }
 
                 ui.horizontal(|ui| {
-                    ui.add_space(525.);
+                    // Where the controls go on the artwork, which is as wide as
+                    // the window; the artwork was drawn for a window 800 wide.
+                    ui.add_space(525. / 800. * ui.ctx().screen_rect().width());
                     let state = self.state_rx.borrow_and_update().clone();
                     ui.vertical(|ui| match state.state {
                         State::Starting => (),
@@ -412,57 +500,86 @@ impl eframe::App for IrminsulApp {
                     });
                 });
             });
-
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
-                ui.horizontal(|ui| {
-                    let discord_icon = egui::include_image!("../assets/discord.svg");
-                    if ui
-                        .add(
-                            Button::image(discord_icon)
-                                .frame(false)
-                                .image_tint_follows_text_color(true),
-                        )
-                        .clicked()
-                    {
-                        ui.ctx()
-                            .open_url(OpenUrl::new_tab("https://discord.gg/aQqdZPHEpP"));
-                    }
-
-                    use egui::special_emojis::GITHUB;
-                    if ui
-                        .add(Button::new(RichText::new(GITHUB).size(16.)).frame(false))
-                        .clicked()
-                    {
-                        ui.ctx()
-                            .open_url(OpenUrl::new_tab("https://github.com/konkers/irminsul"));
-                    }
-
-                    let button = ui.add(
-                        Button::new(
-                            RichText::new(egui_material_icons::icons::ICON_BUG_REPORT).size(16.),
-                        )
-                        .frame(false),
-                    );
-                    if button.clicked() {
-                        self.bug_report_open = true;
-                    }
-                    ui.label(env!("CARGO_PKG_VERSION").to_string());
-                    egui::warn_if_debug_build(ui);
-                });
-            });
         });
 
+        // Power Tools is a window of its own, to be put anywhere on the desktop,
+        // next to the game.
+        if self.power_tools_open {
+            let mut close = false;
+            ctx.show_viewport_immediate(
+                ViewportId::from_hash_of("power_tools_window"),
+                {
+                    let builder = ViewportBuilder::default()
+                        .with_title("Irminsul Power Tools")
+                        .with_inner_size([560., 760.])
+                        .with_min_inner_size([420., 320.]);
+                    if self.saved_state.power_tools_on_top {
+                        builder.with_always_on_top()
+                    } else {
+                        builder
+                    }
+                },
+                |ctx, _class| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| self.power_tools_modal(ui));
+                    });
+                    close = ctx.input(|input| input.viewport().close_requested());
+                },
+            );
+            if close {
+                self.power_tools_open = false;
+            }
+        }
         let progress = self.state_rx.borrow().capture_progress.clone();
+        let updated = self.state_rx.borrow().updated.clone();
         self.capture_popup.update(
             ctx,
             &progress,
+            &updated,
             self.saved_state.achievement_progress.language,
             self.saved_state.show_capture_popup,
+        );
+        let roster = self.state_rx.borrow().roster.clone();
+        self.roster_tab.overlay_ui(
+            ctx,
+            &roster,
+            self.saved_state.achievement_progress.language,
+        );
+        let changes = self.state_rx.borrow().changes.clone();
+        self.changes_popup.update(
+            ctx,
+            &changes,
+            self.roster_tab.icons(),
+            self.saved_state.achievement_progress.language,
+            self.saved_state.show_changes_popup,
         );
     }
 }
 
 impl IrminsulApp {
+    /// The data in use came from another account: show the marks of that one.
+    fn follow_profile(&mut self) {
+        let uid = self.state_rx.borrow().profile.as_ref().map(|profile| profile.uid);
+        if uid != self.last_profile_uid {
+            self.last_profile_uid = uid;
+            self.saved_state.active_profile = uid;
+            self.saved_state
+                .achievement_progress
+                .switch_profile(uid.unwrap_or(0));
+        }
+    }
+
+    /// Part of the names of exported files: the account they are of.
+    fn file_tag(app_state: &AppState) -> String {
+        app_state
+            .profile
+            .as_ref()
+            .map(|profile| format!("{}_", profile.uid))
+            .unwrap_or_default()
+    }
+
     fn hides_to_tray(&self) -> bool {
         self.tray.is_some() && self.saved_state.close_to_tray
     }
@@ -522,7 +639,14 @@ impl IrminsulApp {
     }
 
     fn title_bar(&mut self, ui: &mut egui::Ui) {
-        let in_main = matches!(self.state_rx.borrow().state, State::Main);
+        let state = self.state_rx.borrow().clone();
+        let in_main = matches!(state.state, State::Main);
+        if self.profiles_seen_version != Some(state.profiles_version) {
+            self.profiles_seen_version = Some(state.profiles_version);
+            self.profile_list = profiles::list();
+        }
+        let active = state.profile.clone();
+        let known = self.profile_list.clone();
         let mut close_clicked = false;
         let (tabs_width, button_width) = egui::Sides::new().show(
             ui,
@@ -532,6 +656,9 @@ impl IrminsulApp {
                     for (tab, label) in [
                         (MainTab::Export, "Export"),
                         (MainTab::Achievements, "Achievements"),
+                        (MainTab::Characters, "Characters"),
+                        (MainTab::Materials, "Materials"),
+                        (MainTab::Planner, "Planner"),
                     ] {
                         ui.selectable_value(
                             &mut self.main_tab,
@@ -550,7 +677,92 @@ impl IrminsulApp {
                 if button.clicked() {
                     close_clicked = true;
                 }
-                button.rect.width()
+
+                // The account, by the close button: the name and the UID, which
+                // copy the UID when clicked, and an arrow that opens the accounts
+                // there are, to go from one to another.
+                if in_main {
+                    let arrow = ui
+                        .add(
+                            Button::new(
+                                RichText::new(egui_material_icons::icons::ICON_KEYBOARD_ARROW_DOWN)
+                                    .size(22.),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_text("Accounts");
+                    egui::Popup::menu(&arrow).show(|ui| {
+                        ui.set_min_width(260.);
+                        if known.is_empty() {
+                            ui.label(
+                                RichText::new("No account yet: log in to the game while capture is running")
+                                    .size(13.),
+                            );
+                        }
+                        for profile in &known {
+                            let name = match &profile.nickname {
+                                Some(name) => format!("{name} ({})", profile.uid),
+                                None => profile.uid.to_string(),
+                            };
+                            let selected = active.as_ref().map(|a| a.uid) == Some(profile.uid);
+                            if ui
+                                .selectable_label(selected, RichText::new(name).size(15.))
+                                .clicked()
+                                && !selected
+                            {
+                                let _ = self
+                                    .ui_message_tx
+                                    .send(Message::SelectProfile(Some(profile.uid)));
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("Manage accounts...").clicked() {
+                            self.profiles_open = true;
+                            self.profiles_seen_version = None;
+                            ui.close();
+                        }
+                    });
+
+                    match &active {
+                        Some(profile) => {
+                            let uid = profile.uid.to_string();
+                            let mut copy = false;
+                            // Right to left: the UID is next to the arrow, the name
+                            // before it.
+                            copy |= ui
+                                .add(
+                                    egui::Label::new(
+                                        RichText::new(&uid)
+                                            .size(15.)
+                                            .color(Color32::from_gray(0xc0)),
+                                    )
+                                    .sense(Sense::click()),
+                                )
+                                .on_hover_text("Click to copy the UID")
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .clicked();
+                            if let Some(name) = &profile.nickname {
+                                copy |= ui
+                                    .add(
+                                        egui::Label::new(RichText::new(name).size(15.).strong())
+                                            .sense(Sense::click()),
+                                    )
+                                    .on_hover_text("Click to copy the UID")
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .clicked();
+                            }
+                            if copy {
+                                ui.ctx().copy_text(uid);
+                                self.toasts.info("UID copied");
+                            }
+                        }
+                        None => {
+                            ui.label(RichText::new("No account yet").size(14.).color(Color32::from_gray(0x90)));
+                        }
+                    }
+                }
+                ui.min_rect().width()
             },
         );
         if close_clicked {
@@ -697,8 +909,20 @@ impl IrminsulApp {
     }
 
     fn main_ui(&mut self, ui: &mut egui::Ui, app_state: &AppState) {
-        if self.capture_settings_open {
-            let modal = Modal::new(Id::new("Capture Settings")).show(ui.ctx(), |ui| {
+        // The program picked for the launcher; the dialog is done when it is not
+        // open any more.
+        if let Some(dialog) = &mut self.launcher_dialog {
+            if let Some(path) = dialog.take_picked() {
+                self.saved_state.hoyoplay_dir = path.to_string_lossy().into_owned();
+            }
+            if !matches!(dialog.state(), DialogState::Open) {
+                self.launcher_dialog = None;
+            }
+        }
+        // The settings wait while the dialog to pick a program is open, which
+        // they would be in the way of.
+        if self.capture_settings_open && self.launcher_dialog.is_none() {
+            let modal = Modal::new(Id::new("Settings")).show(ui.ctx(), |ui| {
                 self.capture_settings_modal(ui);
             });
             if modal.should_close() {
@@ -712,6 +936,41 @@ impl IrminsulApp {
             });
             if modal.should_close() {
                 self.optimizer_settings_open = false;
+            }
+        }
+        if let Some((dir, running)) = self.launch_confirm.clone() {
+            let modal = Modal::new(Id::new("Launch confirm")).show(ui.ctx(), |ui| {
+                ui.set_width(380.);
+                ui.heading("Restart Genshin Impact");
+                ui.separator();
+                ui.label("These are running and are closed first:");
+                for process in &running {
+                    ui.label(format!("   {} ({})", process.name, process.pid));
+                }
+                ui.add_space(4.);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "What is not saved in the game is lost. Then HoYoPlay is started,                              and when it is up, the game.",
+                        )
+                        .size(12.),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(6.);
+                ui.horizontal(|ui| {
+                    if ui.button("Close them and start").clicked() {
+                        crate::game_launch::run(dir.clone(), self.launch_status.clone());
+                        self.launch_confirm = None;
+                        self.minimize_for_launch(ui.ctx());
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.launch_confirm = None;
+                    }
+                });
+            });
+            if modal.should_close() {
+                self.launch_confirm = None;
             }
         }
         self.capture_ui(ui, app_state);
@@ -751,15 +1010,6 @@ impl IrminsulApp {
                 },
             );
         });
-        egui::Grid::new("capture_stats")
-            .striped(false)
-            .num_columns(2)
-            .min_col_width(0.)
-            .show(ui, |ui| {
-                Self::data_state(ui, "Items", app_state.updated.items_updated);
-                Self::data_state(ui, "Characters", app_state.updated.characters_updated);
-                Self::data_state(ui, "Achievements", app_state.updated.achievements_updated);
-            });
         if let Some(error) = &app_state.capture_error {
             ui.add(
                 egui::Label::new(
@@ -770,17 +1020,204 @@ impl IrminsulApp {
                 .wrap(),
             );
         }
+
+        // The game is started through HoYoPlay, so that the capture sees it.
+        let status = self
+            .launch_status
+            .lock()
+            .map(|status| status.clone())
+            .unwrap_or_default();
+        let busy = matches!(status, crate::game_launch::Status::Working(_));
+        // Is the game running: looked at about once a second while this is shown.
+        let looked = self
+            .game_checked
+            .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(1000));
+        if !looked {
+            self.game_running = crate::game_launch::game_running();
+            self.game_checked = Some(std::time::Instant::now());
+        }
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(1000));
+        let running = self.game_running;
+        ui.checkbox(&mut self.saved_state.minimize_on_launch, "Minimize on launch")
+            .on_hover_text("Hides this window in the tray when the game is started from here.");
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    !busy,
+                    egui::Button::new(if running {
+                        "Relaunch Genshin Impact"
+                    } else {
+                        "Launch Genshin Impact"
+                    }),
+                )
+                .on_hover_text(
+                    "Closes Genshin Impact and HoYoPlay if they are running, starts HoYoPlay,                      and when it is up, the game. The game started by itself is not seen by                      the capture.",
+                )
+                .clicked()
+            {
+                self.start_game_launch(ui.ctx());
+            }
+            match &status {
+                crate::game_launch::Status::Working(text) => {
+                    ui.add(egui::Spinner::new().size(14.));
+                    ui.label(RichText::new(format!("{text}...")).size(12.));
+                }
+                // Not working and not failed: what the game is doing now.
+                crate::game_launch::Status::Done(_) | crate::game_launch::Status::Idle => {
+                    if running {
+                        ui.label(
+                            RichText::new("Genshin Impact is running")
+                                .size(12.)
+                                .color(Color32::from_rgb(0x4a, 0xde, 0x80)),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new("Genshin Impact is not running")
+                                .size(12.)
+                                .color(Color32::from_gray(0x90)),
+                        );
+                    }
+                }
+                crate::game_launch::Status::Failed(text) => {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(text)
+                                .size(12.)
+                                .color(Color32::from_rgb(0xff, 0x6b, 0x6b)),
+                        )
+                        .wrap(),
+                    );
+                }
+            }
+        });
+        if busy {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+        }
     }
 
-    fn data_state(ui: &mut egui::Ui, source: &str, last_updated: Option<Instant>) {
-        let updated_icon = match last_updated {
-            Some(_) => RichText::new(egui_material_icons::icons::ICON_CHECK_CIRCLE)
-                .color(Color32::from_hex("#00ab3f").unwrap()),
-            None => RichText::new(egui_material_icons::icons::ICON_CHECK_INDETERMINATE_SMALL),
+    /// The button that starts the game: if something of it is running, the user is
+    /// asked first.
+    fn start_game_launch(&mut self, ctx: &egui::Context) {
+        let Some(dir) = crate::game_launch::hoyoplay_dir(&self.saved_state.hoyoplay_dir) else {
+            if let Ok(mut status) = self.launch_status.lock() {
+                *status = crate::game_launch::Status::Failed(
+                    "HoYoPlay was not found. Give its launcher in Settings.".to_owned(),
+                );
+            }
+            return;
         };
-        ui.label(updated_icon);
-        ui.label(source);
-        ui.end_row();
+        let running = crate::game_launch::find_running(&dir);
+        if running.is_empty() {
+            crate::game_launch::run(dir, self.launch_status.clone());
+            self.minimize_for_launch(ctx);
+        } else {
+            self.launch_confirm = Some((dir, running));
+        }
+    }
+
+    /// Hides the window in the tray, if that is what is wanted when the game is
+    /// started from here.
+    fn minimize_for_launch(&mut self, ctx: &egui::Context) {
+        if !self.saved_state.minimize_on_launch {
+            return;
+        }
+        if self.tray.is_some() {
+            self.set_window_visible(false);
+        } else {
+            ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+        }
+    }
+
+    /// The accounts captured so far, to choose the one to use.
+    fn profiles_modal(&mut self, ui: &mut egui::Ui, app_state: &AppState) {
+        ui.set_width(460.0);
+        ui.heading("Accounts");
+        ui.separator();
+
+        if self.profiles_seen_version != Some(app_state.profiles_version) {
+            self.profiles_seen_version = Some(app_state.profiles_version);
+            self.profile_list = profiles::list();
+        }
+        let active = app_state.profile.as_ref().map(|profile| profile.uid);
+
+        if self.profile_list.is_empty() {
+            ui.label(
+                "Nothing captured yet. Log in to the game while capture is running, and the \
+                 account is stored here.",
+            );
+        }
+        for profile in self.profile_list.clone() {
+            ui.horizontal(|ui| {
+                let name = match &profile.nickname {
+                    Some(name) => format!("{name} ({})", profile.uid),
+                    None => profile.uid.to_string(),
+                };
+                let selected = active == Some(profile.uid);
+                if ui.radio(selected, RichText::new(name).size(15.)).clicked() && !selected {
+                    let _ = self
+                        .ui_message_tx
+                        .send(Message::SelectProfile(Some(profile.uid)));
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let confirming = self.profile_delete_confirm == Some(profile.uid);
+                    let label = if confirming {
+                        RichText::new("Delete?").color(Color32::from_rgb(0xff, 0x6b, 0x6b))
+                    } else {
+                        RichText::new(egui_material_icons::icons::ICON_DELETE)
+                    };
+                    if ui.button(label).on_hover_text("Delete the stored data").clicked() {
+                        if confirming {
+                            self.profile_delete_confirm = None;
+                            let _ = self.ui_message_tx.send(Message::DeleteProfile(profile.uid));
+                        } else {
+                            self.profile_delete_confirm = Some(profile.uid);
+                        }
+                    }
+                });
+            });
+
+            let updated = profile
+                .updated_at
+                .as_deref()
+                .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
+                .map(|time| time.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "never".to_owned());
+            ui.horizontal(|ui| {
+                ui.add_space(24.);
+                ui.label(
+                    RichText::new(format!(
+                        "{} items, {} characters, {} achievements; updated {updated}",
+                        profile.items, profile.characters, profile.achievements
+                    ))
+                    .size(12.),
+                );
+            });
+            ui.add_space(4.);
+        }
+
+        ui.separator();
+        egui::Sides::new().show(
+            ui,
+            |ui| {
+                if ui.button("Open folder").clicked() {
+                    match profiles::profiles_dir() {
+                        Ok(dir) => {
+                            let _ = std::fs::create_dir_all(&dir);
+                            if let Err(e) = open::that(dir) {
+                                tracing::error!("unable to open the profiles folder: {e}");
+                            }
+                        }
+                        Err(e) => tracing::error!("{e}"),
+                    }
+                }
+            },
+            |ui| {
+                if ui.button("Ok").clicked() {
+                    ui.close()
+                }
+            },
+        );
     }
 
     fn genshin_optimizer_ui(&mut self, ui: &mut egui::Ui, app_state: &AppState) {
@@ -813,7 +1250,8 @@ impl IrminsulApp {
                                 let mut optimizer_save_dialog = FileDialog::new()
                                     .add_file_filter_extensions("JSON files", vec!["json"])
                                     .default_file_name(&format!(
-                                        "genshin_export_{}.json",
+                                        "genshin_export_{}{}.json",
+                                        Self::file_tag(app_state),
                                         now.format("%Y-%m-%d_%H-%M")
                                     ));
                                 optimizer_save_dialog.save_file();
@@ -881,8 +1319,15 @@ impl IrminsulApp {
     }
 
     fn power_tools_modal(&mut self, ui: &mut egui::Ui) {
-        ui.set_width(460.0);
         ui.heading("Power Tools");
+        if ui
+            .checkbox(&mut self.saved_state.power_tools_on_top, "Keep this window on top of all others")
+            .changed()
+        {
+            ui.ctx().send_viewport_cmd(ViewportCommand::WindowLevel(window_level(
+                self.saved_state.power_tools_on_top,
+            )));
+        }
         ui.separator();
         if ui
             .checkbox(&mut self.saved_state.log_raw_packets, "Log raw packets")
@@ -975,14 +1420,56 @@ impl IrminsulApp {
                 }
             });
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("Preview capture popup").clicked() {
                 self.capture_popup.start_preview(false);
             }
             if ui.button("Preview failure").clicked() {
                 self.capture_popup.start_preview(true);
             }
+            if ui.button("Preview changes popup").clicked() {
+                self.changes_popup.start_preview();
+            }
         });
+
+        ui.separator();
+        ui.label(RichText::new("Traffic probe").size(16.));
+        ui.label(
+            RichText::new(
+                "While on, commands that carry items, player properties, characters or the \
+                 numbers below are written as lines of text to probe-<date>.log in the log \
+                 folder: ids and counts, not raw packets. Nothing is sent anywhere.",
+            )
+            .size(12.),
+        );
+        let mut probe_on = crate::probe::enabled();
+        if ui.checkbox(&mut probe_on, "Record what the traffic says").changed() {
+            crate::probe::set_enabled(probe_on);
+            if probe_on {
+                crate::probe::set_needles(&self.saved_state.probe_needles);
+                crate::probe::note("probe on");
+            }
+        }
+        ui.horizontal(|ui| {
+            ui.label("Numbers to look for");
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.saved_state.probe_needles)
+                        .hint_text("e.g. 23813567, 120")
+                        .desired_width(220.),
+                )
+                .changed()
+            {
+                crate::probe::set_needles(&self.saved_state.probe_needles);
+            }
+        });
+        ui.separator();
+
+        if ui.button("Open log folder").clicked() {
+            thread::spawn(|| {
+                let _ = open_log_dir();
+            });
+        }
 
         if ui.button("Open timeline folder").clicked() {
             match crate::debug_timeline::debug_dir() {
@@ -997,37 +1484,26 @@ impl IrminsulApp {
         }
     }
 
-    fn bug_report_modal(&mut self, ui: &mut egui::Ui) {
-        ui.set_width(300.0);
-        ui.heading("Bug Report");
-        ui.separator();
-        ui.label("When filing a bug, please include the latest log file:");
-        if ui.button("Open log directory").clicked() {
-            thread::spawn(|| {
-                let _ = open_log_dir();
-            });
+    /// A little bigger text, and more room between the items, for the windows of
+    /// settings.
+    fn roomier(ui: &mut egui::Ui) {
+        use egui::{FontId, TextStyle};
+        let style = ui.style_mut();
+        style.spacing.item_spacing = egui::vec2(10., 14.);
+        for (text_style, size) in [
+            (TextStyle::Body, 16.),
+            (TextStyle::Button, 16.),
+            (TextStyle::Small, 13.),
+            (TextStyle::Heading, 24.),
+        ] {
+            style.text_styles.insert(text_style, FontId::proportional(size));
         }
-        ui.separator();
-        egui::Sides::new().show(
-            ui,
-            |_ui| {},
-            |ui| {
-                if ui.button("New GitHub Issue").clicked() {
-                    ui.ctx().open_url(OpenUrl::new_tab(
-                        "https://github.com/konkers/irminsul/issues/new",
-                    ));
-                    ui.close()
-                }
-                if ui.button("Cancel").clicked() {
-                    ui.close()
-                }
-            },
-        );
     }
 
     fn capture_settings_modal(&mut self, ui: &mut egui::Ui) {
-        ui.set_width(380.0);
-        ui.heading("Capture Settings");
+        Self::roomier(ui);
+        ui.set_width(460.0);
+        ui.heading("Settings");
         ui.separator();
         ui.checkbox(
             &mut self.saved_state.auto_start_capture,
@@ -1037,6 +1513,30 @@ impl IrminsulApp {
             &mut self.saved_state.show_capture_popup,
             "Show a progress popup while the game's data is captured",
         );
+        ui.checkbox(
+            &mut self.saved_state.show_changes_popup,
+            "Show a popup with what changed (mora, items) as you play",
+        );
+        ui.vertical(|ui| {
+            ui.label("Hoyo Play Launcher exe");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.saved_state.hoyoplay_dir)
+                        .hint_text("empty: found where it is installed by default")
+                        .desired_width(340.),
+                );
+                if ui
+                    .button(egui_material_icons::icons::ICON_FOLDER_OPEN)
+                    .on_hover_text("Choose launcher.exe")
+                    .clicked()
+                {
+                    let mut dialog = FileDialog::new()
+                        .add_file_filter_extensions("Programs", vec!["exe"]);
+                    dialog.pick_file();
+                    self.launcher_dialog = Some(dialog);
+                }
+            });
+        });
         ui.add_enabled_ui(self.tray.is_some(), |ui| {
             ui.checkbox(
                 &mut self.saved_state.close_to_tray,
@@ -1079,7 +1579,8 @@ impl IrminsulApp {
     }
 
     fn optimizer_settings_modal(&mut self, ui: &mut egui::Ui) {
-        ui.set_width(300.0);
+        Self::roomier(ui);
+        ui.set_width(380.0);
         ui.heading("Genshin Optimizer Settings");
         ui.separator();
         ui.checkbox(
@@ -1264,7 +1765,8 @@ impl IrminsulApp {
                                 let mut achievement_save_dialog = FileDialog::new()
                                     .add_file_filter_extensions("JSON files", vec!["json"])
                                     .default_file_name(&format!(
-                                        "achievements_{}.json",
+                                        "achievements_{}{}.json",
+                                        Self::file_tag(app_state),
                                         now.format("%Y-%m-%d_%H-%M")
                                     ));
                                 achievement_save_dialog.save_file();
