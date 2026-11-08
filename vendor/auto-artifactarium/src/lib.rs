@@ -62,10 +62,14 @@ use protobuf::UnknownValueRef;
 use crate::kcp::KcpSniffer;
 pub use crate::unk_util::Achievement;
 use crate::unk_util::{
-    find_player_mora, find_player_nickname, find_player_props, find_player_uid, matches_avatar_fight_props,
-    matches_avatar_prop_update, matches_item_update, matches_talent_update,
+    find_player_mora, find_player_nickname, find_player_props, find_player_uid, find_uid_beside_name,
+    matches_avatar_fight_props,
+    matches_avatar_prop_update, matches_gadget_interaction, matches_item_update, matches_player_location,
+    matches_player_location_of,
+    find_scene_arrival, find_teleport_target,
+    matches_scene_gadgets, matches_talent_update,
 };
-pub use crate::unk_util::{AvatarPropUpdate, TalentUpdate};
+pub use crate::unk_util::{QuestUpdate, StoryEntry, StoryStatus, AvatarMotion, AvatarPropUpdate, GadgetInteraction, PlayerLocation, SceneGadget, TalentUpdate};
 pub use crate::unk_util::{
     matches_achievement_all_data_notify, matches_avatars_all_data_notify,
     matches_get_player_token_rsp, matches_items_all_data_notify,
@@ -131,6 +135,8 @@ pub struct GameCommand {
     #[allow(unused)]
     pub data_len: u32,
     pub proto_data: Vec<u8>,
+    /// The client sent it (to the server), and did not receive it.
+    pub from_client: bool,
 }
 
 impl GameCommand {
@@ -165,6 +171,7 @@ impl GameCommand {
             header_len,
             data_len,
             proto_data: data,
+            from_client: false,
         })
     }
 
@@ -242,6 +249,8 @@ pub enum SnifferEvent {
     /// A command that could not be decrypted, kept for finding out why.
     UndecryptedSample(Vec<u8>),
     SessionKeyLost,
+    /// The session key kept from an earlier run fits: no new login is needed.
+    SessionKeyResumed,
     /// The player id found in the server's answer to the token request.
     PlayerUid(u32),
     /// The user id the header of the packets carries, if it is not zero.
@@ -306,6 +315,7 @@ impl fmt::Display for SnifferEvent {
                 write!(f, "saved a sample of {} undecryptable bytes", bytes.len())
             }
             Self::SessionKeyLost => write!(f, "session key stopped working"),
+            Self::SessionKeyResumed => write!(f, "session key kept from the earlier run fits: joined the running connection"),
             Self::PlayerUid(uid) => write!(f, "player id {uid} (from the token response)"),
             Self::HeaderUserId(uid) => write!(f, "packet header user id {uid}"),
             Self::PlayerNickname(name) => write!(f, "player name {name:?}"),
@@ -348,6 +358,13 @@ pub struct GameSniffer {
     samples_saved: u32,
     decrypt_failures: u32,
     last_event_flush: Option<Instant>,
+    /// The session key of an earlier run of the program, to try when this one is
+    /// started while the game is running (it is the same while the connection is).
+    retained_key: Option<Vec<u8>>,
+    /// The key in use came from that, and how many commands in a row it did not
+    /// fit (the first may be a part of one that began before).
+    key_resumed: bool,
+    resumed_misses: u32,
 }
 
 impl GameSniffer {
@@ -364,6 +381,21 @@ impl GameSniffer {
                 .filter_map(|rsa_key| rsa_key.clone().ok())
                 .collect(),
             ..Default::default()
+        }
+    }
+
+    /// A session key from an earlier run, tried when the connection is joined in the
+    /// middle.
+    pub fn set_retained_key(mut self, key: Option<Vec<u8>>) -> Self {
+        self.retained_key = key;
+        self
+    }
+
+    /// The session key of the connection, once found.
+    pub fn session_key(&self) -> Option<&[u8]> {
+        match &self.key {
+            Some(Key::Session(key)) => Some(key),
+            _ => None,
         }
     }
 
@@ -411,6 +443,7 @@ impl GameSniffer {
                 self.recv_kcp = None;
                 self.sent_kcp = None;
                 self.key = None;
+                self.key_resumed = false;
                 Some(GamePacket::Connection(packet))
             }
             ConnectionPacket::HandshakeEstablished => {
@@ -458,6 +491,10 @@ impl GameSniffer {
                 .receive_segments(kcp_seg)
                 .into_iter()
                 .filter_map(|data| self.receive_command(data))
+                .map(|mut command| {
+                    command.from_client = direction == PacketDirection::Sent;
+                    command
+                })
                 .collect();
 
             return Some(commands);
@@ -475,6 +512,19 @@ impl GameSniffer {
 
         let key_r = match &self.key {
             None => {
+                // The program was started while the game was running: the key of the
+                // connection is the one kept, if it fits.
+                if let Some(kept) = self.retained_key.clone() {
+                    let mut test = data.clone();
+                    decrypt_command(&kept, &mut test);
+                    if test[0] == 0x45 && test[1] == 0x67 && test[test.len() - 2] == 0x89 && test[test.len() - 1] == 0xAB {
+                        self.events.push(SnifferEvent::SessionKeyResumed);
+                        self.key = Some(Key::Session(kept));
+                        self.key_resumed = true;
+                        self.resumed_misses = 0;
+                        return self.receive_command(data);
+                    }
+                }
                 let key = lookup_initial_key(&self.initial_keys, &data);
                 let version = u16::from_be_bytes([data[0], data[1]]) ^ 0x4567;
                 self.events.push(SnifferEvent::InitialKey {
@@ -564,7 +614,12 @@ impl GameSniffer {
 
                 if test[0] == 0x45 && test[1] == 0x67 {
                     //|| test[test.len() - 2] == 0x89 && test[test.len() - 1] == 0xAB
+                    self.resumed_misses = 0;
                     self.key.as_ref().unwrap()
+                } else if self.key_resumed && self.resumed_misses < 6 {
+                    // The first things after joining may be pieces of what began before.
+                    self.resumed_misses += 1;
+                    return None;
                 } else {
                     warn!("Invalidated session key");
                     self.events.push(SnifferEvent::SessionKeyLost);
@@ -633,7 +688,9 @@ impl GameSniffer {
                     sent_time: header_command.sent_ms,
                 });
                 let split = (command.header_len as usize).min(command.proto_data.len());
-                if let Some(uid) = find_player_uid(&command.proto_data[split..]) {
+                if let Some(uid) =
+                    find_player_uid(&command.proto_data[split..], Some(header_command.sent_ms / 1000))
+                {
                     self.events.push(SnifferEvent::PlayerUid(uid));
                 }
                 info!(?self.sent_time, "setting new send time");
@@ -703,6 +760,82 @@ pub fn matches_player_props(game_command: &GameCommand) -> Option<Vec<(u64, u64)
     find_player_props(&game_command.proto_data)
 }
 
+/// The gadgets (chests among them) that came into view, if the command says so.
+pub fn matches_gadgets_in_view(game_command: &GameCommand) -> Option<Vec<SceneGadget>> {
+    matches_scene_gadgets(&game_command.proto_data)
+}
+
+/// What was done to a gadget of the world (a chest opened, say), if the command
+/// is the game's answer to that.
+pub fn matches_gadget_use(game_command: &GameCommand) -> Option<GadgetInteraction> {
+    matches_gadget_interaction(&game_command.proto_data)
+}
+
+/// Where a teleport goes (the scene, and the number of the point in it), if the
+/// command says that.  It is command 26942 in this version of the game.
+pub fn matches_teleport_target(game_command: &GameCommand) -> Option<(u32, u32)> {
+    if game_command.command_id != 26942 {
+        return None;
+    }
+    find_teleport_target(&game_command.proto_data)
+}
+
+/// Where the player comes in when the scene changes (the scene, and the place),
+/// if the command says that.  It is command 27748 in this version of the game.
+pub fn matches_scene_arrival(game_command: &GameCommand) -> Option<(u32, [f32; 3])> {
+    if game_command.command_id != 27748 {
+        return None;
+    }
+    find_scene_arrival(&game_command.proto_data)
+}
+
+/// Where a player is, if the command says that (it does every few seconds).
+/// `expected` is the id of the account that is followed, if it is known.
+/// The state of quests, as the server says it (command 24303 in this version of the game):
+/// the whole list when logging in, and what changed after.
+pub fn matches_quest_updates(game_command: &GameCommand) -> Vec<QuestUpdate> {
+    if game_command.command_id != 24303 || game_command.from_client {
+        return Vec::new();
+    }
+    crate::unk_util::find_quest_updates(&game_command.proto_data)
+}
+
+/// The whole quest list, told when logging in (command 897 in this version of the game).
+pub fn matches_quest_list(game_command: &GameCommand) -> Vec<StoryEntry> {
+    if game_command.command_id != 897 || game_command.from_client {
+        return Vec::new();
+    }
+    crate::unk_util::find_quest_list(&game_command.proto_data)
+}
+
+/// A story of the quest list and the state of each quest of it, as the server says it
+/// (command 26691 in this version of the game).
+pub fn matches_story_update(game_command: &GameCommand) -> Option<(u32, Vec<(u32, u32)>)> {
+    if game_command.command_id != 26691 || game_command.from_client {
+        return None;
+    }
+    crate::unk_util::find_story_update(&game_command.proto_data)
+}
+
+/// Where the player's avatar is and which way it faces, as the client tells the server as it
+/// moves (several times a second), if the command has it.
+pub fn matches_avatar_motion(game_command: &GameCommand) -> Option<AvatarMotion> {
+    if !game_command.from_client || game_command.proto_data.len() > 6_000 {
+        return None;
+    }
+    crate::unk_util::find_avatar_motion(&game_command.proto_data)
+}
+
+pub fn matches_location_of_player(game_command: &GameCommand, expected: Option<u32>) -> Option<PlayerLocation> {
+    matches_player_location_of(&game_command.proto_data, expected)
+}
+
+/// The id of the player of this name, if the command has the name and the id
+/// together.  For when the id was not in the answer to the login.
+pub fn matches_uid_of_player(game_command: &GameCommand, name: &str) -> Option<u32> {
+    find_uid_beside_name(&game_command.proto_data, name)
+}
+
 /// The player's mora, if the command has it.
 pub fn matches_player_mora(game_command: &GameCommand) -> Option<u64> {
     find_player_mora(&game_command.proto_data)
@@ -711,4 +844,45 @@ pub fn matches_player_mora(game_command: &GameCommand) -> Option<u64> {
 /// Matches the full avatar list by content, whatever its command id is.
 pub fn matches_avatar_packet(game_command: &GameCommand) -> Option<Vec<r#gen::protos::AvatarInfo>> {
     matches_avatars_all_data_notify(&game_command.proto_data)
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+
+    /// A command as it is on the wire: magic, id, header and data lengths, data, tail,
+    /// with the key put on it.
+    fn on_the_wire(key: &[u8], command_id: u16, data: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0x45, 0x67];
+        bytes.extend_from_slice(&command_id.to_be_bytes());
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(data);
+        bytes.extend_from_slice(&[0x89, 0xAB]);
+        decrypt_command(key, &mut bytes);
+        bytes
+    }
+
+    #[test]
+    fn a_kept_session_key_that_fits_is_used_when_the_connection_is_joined() {
+        let key: Vec<u8> = (0..4096u32).map(|n| (n * 7 + 3) as u8).collect();
+        let mut sniffer = GameSniffer::new().set_retained_key(Some(key.clone()));
+        // A piece of something that began before: nothing, and nothing is lost.
+        assert!(sniffer.receive_command(vec![1; 40]).is_none());
+        let command = sniffer.receive_command(on_the_wire(&key, 4469, b"abc")).expect("decrypted");
+        assert_eq!(command.command_id, 4469);
+        assert!(sniffer.session_key().is_some());
+        // Pieces that do not fit a few times are borne; a good one goes on.
+        assert!(sniffer.receive_command(vec![2; 40]).is_none());
+        assert!(sniffer.receive_command(on_the_wire(&key, 20584, b"x")).is_some());
+    }
+
+    #[test]
+    fn a_kept_session_key_that_does_not_fit_is_not_used() {
+        let key: Vec<u8> = (0..4096u32).map(|n| (n * 7 + 3) as u8).collect();
+        let other: Vec<u8> = (0..4096u32).map(|n| (n * 5 + 1) as u8).collect();
+        let mut sniffer = GameSniffer::new().set_retained_key(Some(key));
+        assert!(sniffer.receive_command(on_the_wire(&other, 4469, b"abc")).is_none());
+        assert!(sniffer.session_key().is_none());
+    }
 }

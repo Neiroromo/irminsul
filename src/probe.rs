@@ -50,12 +50,41 @@ pub fn set_needles(text: &str) {
     }
 }
 
+/// The messages as they came, in hex, for a while after a note: what cannot be
+/// told from the lines of the other file, such as the make-up of a message that
+/// is not known yet, can be read from these.
+fn raw_file() -> &'static Mutex<Option<(String, BufWriter<File>)>> {
+    static FILE: OnceLock<Mutex<Option<(String, BufWriter<File>)>>> = OnceLock::new();
+    FILE.get_or_init(Default::default)
+}
+
 fn write_line(text: &str) {
+    write_to(file(), "probe", text);
+}
+
+/// One line of the track of the player (`track-<date>.log`): every report of where
+/// they are, not capped.
+pub fn track(text: &str) {
+    static FILE: OnceLock<Mutex<Option<(String, BufWriter<File>)>>> = OnceLock::new();
+    write_to(FILE.get_or_init(Default::default), "track", text);
+}
+
+/// One line of the census of what the game puts in view (`census-<date>.log`).
+pub fn census(text: &str) {
+    static FILE: OnceLock<Mutex<Option<(String, BufWriter<File>)>>> = OnceLock::new();
+    write_to(FILE.get_or_init(Default::default), "census", text);
+}
+
+fn write_raw(text: &str) {
+    write_to(raw_file(), "probe-raw", text);
+}
+
+fn write_to(slot: &Mutex<Option<(String, BufWriter<File>)>>, stem: &str, text: &str) {
     let Some(dir) = crate::log_dir().ok() else {
         return;
     };
-    let name = format!("probe-{}.log", Local::now().format("%Y-%m-%d"));
-    let Ok(mut file) = file().lock() else {
+    let name = format!("{stem}-{}.log", Local::now().format("%Y-%m-%d"));
+    let Ok(mut file) = slot.lock() else {
         return;
     };
     if file.as_ref().is_none_or(|(open, _)| *open != name) {
@@ -78,7 +107,63 @@ fn write_line(text: &str) {
 /// For this long after a note, commands of a kind that is not often seen are
 /// written too, whatever they look like: what the game says about something
 /// that was just done is one of those.
-const RARE_WINDOW: Duration = Duration::from_secs(25);
+const RARE_WINDOW: Duration = Duration::from_secs(40);
+
+/// How long the traffic is kept as it came when a game session begins: the
+/// first things the game says about the world come then.
+const SESSION_WINDOW: Duration = Duration::from_secs(150);
+
+/// Of each kind of command, this many are kept as they came in a window.
+const RAW_SAMPLES: u32 = 4;
+/// A message longer than this is not kept as it came.
+const RAW_MAX_LEN: usize = 150_000;
+/// All that is kept as it came in a window, at most.
+const RAW_MAX_BYTES: usize = 6_000_000;
+
+#[derive(Default)]
+struct Window {
+    /// How many of each command since the last note.
+    counts: HashMap<u16, u32>,
+    /// How many of each command were kept as they came in this window.
+    samples: HashMap<u16, u32>,
+    bytes: usize,
+}
+
+fn window() -> &'static Mutex<Window> {
+    static WINDOW: OnceLock<Mutex<Window>> = OnceLock::new();
+    WINDOW.get_or_init(Default::default)
+}
+
+fn hex(data: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(data.len() * 2);
+    for byte in data {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// Says how often each command came since the last note, and starts counting
+/// anew.
+fn flush_counts() {
+    let Ok(mut window) = window().lock() else {
+        return;
+    };
+    let mut counts: Vec<(u16, u32)> = window.counts.drain().collect();
+    window.samples.clear();
+    window.bytes = 0;
+    drop(window);
+    if counts.is_empty() {
+        return;
+    }
+    counts.sort_by_key(|&(command, count)| (std::cmp::Reverse(count), command));
+    let text: Vec<String> = counts
+        .iter()
+        .take(60)
+        .map(|(command, count)| format!("{command}x{count}"))
+        .collect();
+    write_line(&format!("COUNTS since the last note: {}", text.join(" ")));
+}
 
 fn rare_window() -> &'static Mutex<Option<Instant>> {
     static WINDOW: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
@@ -94,10 +179,22 @@ fn seen() -> &'static Mutex<HashMap<u16, (Instant, u32)>> {
 
 /// A note in the probe's file: what the user was doing at that time.
 pub fn note(text: &str) {
+    note_for(text, RARE_WINDOW);
+}
+
+/// The game's session began (the client said hello): what follows is the world
+/// being told, so it is kept for longer.
+pub fn session_started() {
+    note_for("session started", SESSION_WINDOW);
+}
+
+fn note_for(text: &str, length: Duration) {
     if enabled() {
+        flush_counts();
         write_line(&format!("NOTE {text}"));
+        write_raw(&format!("NOTE {text}"));
         if let Ok(mut window) = rare_window().lock() {
-            *window = Some(Instant::now() + RARE_WINDOW);
+            *window = Some(Instant::now() + length);
         }
     }
 }
@@ -298,21 +395,67 @@ fn describe(
 
 /// Looks at a command, and writes a line if it is of interest.
 pub fn observe(command_id: u16, body: &[u8]) {
-    if !enabled() || body.len() > 30_000 {
+    if !enabled() {
+        return;
+    }
+    let now = Instant::now();
+    // The last twenty seconds of what came (the small, not the ones that come all the
+        // time), and written out when the
+    // scene changes: a teleport is asked for just before it is done, and what is
+    // asked (which waypoint) is in a message that is not otherwise kept.
+    {
+        static RECENT: OnceLock<Mutex<std::collections::VecDeque<(Instant, u16, Vec<u8>)>>> = OnceLock::new();
+        let recent = RECENT.get_or_init(Default::default);
+        if let Ok(mut list) = recent.lock() {
+            while list.front().is_some_and(|(at, _, _)| now.duration_since(*at) > Duration::from_secs(20)) {
+                list.pop_front();
+            }
+            if command_id == 27748 {
+                let kept: Vec<(Instant, u16, Vec<u8>)> = list.drain(..).collect();
+                drop(list);
+                for (at, command, body) in kept {
+                    write_raw(&format!(
+                        "BEFORE-SCENE-CHANGE {:.2}s cmd={command} len={} {}",
+                        now.duration_since(at).as_secs_f32(),
+                        body.len(),
+                        hex(&body)
+                    ));
+                }
+            } else if body.len() <= 300 && !matches!(command_id, 20584 | 4469 | 24007 | 28137 | 7103 | 21972) {
+                list.push_back((now, command_id, body.to_vec()));
+            }
+        }
+    }
+    let in_window = rare_window()
+        .lock()
+        .ok()
+        .and_then(|window| *window)
+        .is_some_and(|until| now < until);
+    if let Ok(mut window) = window().lock() {
+        *window.counts.entry(command_id).or_insert(0) += 1;
+        // What says where the player is and what is around them (the place told, a
+        // thing put into view, a change of scene) is kept whenever it comes, a good
+        // many of them: they are what the maps of the scenes are worked out from.
+        let places = matches!(command_id, 4469 | 20584 | 27748 | 26942);
+        if (in_window || places) && body.len() <= RAW_MAX_LEN && window.bytes < RAW_MAX_BYTES {
+            let taken = window.samples.entry(command_id).or_insert(0);
+            if *taken < if places { 600 } else { RAW_SAMPLES } {
+                *taken += 1;
+                window.bytes += body.len() * 2;
+                drop(window);
+                write_raw(&format!("cmd={command_id} len={} {}", body.len(), hex(body)));
+            }
+        }
+    }
+    if body.len() > 30_000 {
         return;
     }
     let needles = needles().lock().map(|n| n.clone()).unwrap_or_default();
     let mut found = Found::default();
     let mut tree = String::new();
     describe(body, 0, "", &needles, &mut found, &mut tree);
-    let now = Instant::now();
     let is_rare = rare(command_id, now);
     if !found.interesting() {
-        let in_window = rare_window()
-            .lock()
-            .ok()
-            .and_then(|window| *window)
-            .is_some_and(|until| now < until);
         if in_window && is_rare && body.len() <= 3000 && !tree.is_empty() {
             if tree.len() > 700 {
                 tree.truncate(700);
@@ -414,6 +557,11 @@ mod tests {
         let mut found = Found::default();
         describe(&noise, 0, "", &[], &mut found, &mut String::new());
         assert!(!found.interesting());
+    }
+
+    #[test]
+    fn bytes_are_written_as_hex() {
+        assert_eq!(hex(&[0x00, 0x0a, 0xff]), "000aff");
     }
 
     #[test]

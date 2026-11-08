@@ -24,6 +24,22 @@ pub enum ChangeKind {
     Refinement(u32),
     /// A line of text, for what has no number.
     Note(String),
+    /// Chests of this tier (1 to 4; 0 for the others) came into view, closed:
+    /// the number of a change of this kind is how many.
+    ChestSeen(u8),
+    /// A chest of this gadget was opened.
+    ChestOpened(u32),
+    /// How many chests are opened, of how many known: a later one replaces the
+    /// one before.  The number of a change of this kind is how many are known.
+    ChestTotals { opened: u32, known: u32 },
+}
+
+/// Whether two kinds are one line of the feed.
+fn same_line(a: &ChangeKind, b: &ChangeKind) -> bool {
+    match (a, b) {
+        (ChangeKind::ChestTotals { .. }, ChangeKind::ChestTotals { .. }) => true,
+        _ => a == b,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -56,9 +72,16 @@ pub struct Feed {
 
 impl Feed {
     pub fn add(&mut self, change: &Change, now: Instant) {
-        match self.lines.iter_mut().find(|line| line.kind == change.kind) {
+        match self
+            .lines
+            .iter_mut()
+            .find(|line| same_line(&line.kind, &change.kind))
+        {
             Some(line) => {
-                if matches!(
+                if matches!(line.kind, ChangeKind::ChestTotals { .. }) {
+                    line.kind = change.kind.clone();
+                    line.delta = change.delta;
+                } else if matches!(
                     line.kind,
                     ChangeKind::Level(_)
                         | ChangeKind::Talent(..)
@@ -127,6 +150,40 @@ mod tests {
         feed.add(&level(81), now);
         assert_eq!(feed.lines.len(), 1);
         assert_eq!(feed.lines[0].delta, 81);
+    }
+
+    #[test]
+    fn the_totals_of_chests_replace_the_ones_before() {
+        let now = Instant::now();
+        let mut feed = Feed::default();
+        let totals = |opened, known| Change {
+            kind: ChangeKind::ChestTotals { opened, known },
+            delta: known as i64,
+        };
+        feed.add(&totals(3, 40), now);
+        feed.add(&totals(4, 41), now);
+        assert_eq!(feed.lines.len(), 1);
+        assert_eq!(
+            feed.lines[0].kind,
+            ChangeKind::ChestTotals {
+                opened: 4,
+                known: 41
+            }
+        );
+    }
+
+    #[test]
+    fn chests_seen_add_up() {
+        let now = Instant::now();
+        let mut feed = Feed::default();
+        let seen = |count| Change {
+            kind: ChangeKind::ChestSeen(1),
+            delta: count,
+        };
+        feed.add(&seen(2), now);
+        feed.add(&seen(3), now);
+        assert_eq!(feed.lines.len(), 1);
+        assert_eq!(feed.lines[0].delta, 5);
     }
 
     #[test]

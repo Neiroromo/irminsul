@@ -377,6 +377,583 @@ pub fn matches_talent_update(data: &[u8]) -> Option<TalentUpdate> {
         .then_some(TalentUpdate { guids, ids, levels })
 }
 
+/// Things in the world have ids that begin with these: a thing that is in the
+/// scene is "an entity", and the kind of it (a chest, a plant) is "a gadget".
+const ENTITY_IDS: std::ops::Range<u64> = 0x2000_0000..0x3000_0000;
+const GADGET_IDS: std::ops::Range<u64> = 70_000_000..80_000_000;
+/// The group a gadget of the world belongs to is told by a number of nine digits.
+const GROUP_IDS: std::ops::Range<u64> = 100_000_000..1_000_000_000;
+
+/// A gadget that came into view: what it is, which one it is in the game's own
+/// scripts, and where.  The group and the id in it (the "config") stay the same
+/// from session to session, which the number of the entity does not.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SceneGadget {
+    pub entity_id: u32,
+    pub gadget_id: u32,
+    pub group_id: u32,
+    pub config_id: u32,
+    pub position: Option<[f32; 3]>,
+    /// What state the gadget is in, if the game says (a chest is 101 closed, 102
+    /// opened: an opened chest is not sent in the world, but it may be elsewhere).
+    pub state: Option<u32>,
+}
+
+/// Three small floats in a row: a place in the world.
+fn position_in(bytes: &[u8]) -> Option<[f32; 3]> {
+    let message = Unk::parse_from_bytes(bytes).ok()?;
+    let mut numbers: Vec<(u32, f32)> = Vec::new();
+    for (field, value) in message.unknown_fields().iter() {
+        if let Fixed32(bits) = value {
+            numbers.push((field, f32::from_bits(bits)));
+        }
+    }
+    if numbers.len() != 3 || numbers.iter().any(|(_, n)| !n.is_finite() || n.abs() > 100_000.) {
+        return None;
+    }
+    numbers.sort_by_key(|(field, _)| *field);
+    Some([numbers[0].1, numbers[1].1, numbers[2].1])
+}
+
+/// A thing that is placed in the world, if `bytes` is one: its entity id, a
+/// part that has the gadget, the group and the config, and where it is.  All of
+/// it is found by what the numbers look like, not by the number of the field.
+fn scene_gadget(bytes: &[u8]) -> Option<SceneGadget> {
+    let entity = Unk::parse_from_bytes(bytes).ok()?;
+    let mut entity_id = None;
+    let mut parts: Vec<&[u8]> = Vec::new();
+    let mut inner = Vec::new();
+    for (_, value) in entity.unknown_fields().iter() {
+        match value {
+            Varint(v) if ENTITY_IDS.contains(&v) && entity_id.is_none() => entity_id = Some(v),
+            LengthDelimited(part) => inner.push(part.to_vec()),
+            _ => (),
+        }
+    }
+    parts.extend(inner.iter().map(Vec::as_slice));
+    let entity_id = entity_id?;
+
+    let mut found = None;
+    let mut position = None;
+    for part in &parts {
+        let Ok(message) = Unk::parse_from_bytes(part) else {
+            continue;
+        };
+        let mut gadget = None;
+        let mut group = None;
+        let mut numbers: Vec<(u32, u64)> = Vec::new();
+        let mut places: Vec<Vec<u8>> = Vec::new();
+        for (field, value) in message.unknown_fields().iter() {
+            match value {
+                Varint(v) if GADGET_IDS.contains(&v) && gadget.is_none() => gadget = Some(v),
+                Varint(v) if GROUP_IDS.contains(&v) && group.is_none() => group = Some((field, v)),
+                Varint(v) => numbers.push((field, v)),
+                LengthDelimited(bytes) => places.push(bytes.to_vec()),
+                _ => (),
+            }
+        }
+        if let (Some(gadget), Some((group_field, group))) = (gadget, group) {
+            // The config is the number after the group.
+            let config = numbers
+                .iter()
+                .find(|(field, _)| *field == group_field + 1)
+                .map(|(_, v)| *v);
+            if let Some(config) = config
+                && found.is_none()
+            {
+                let state = numbers.iter().find(|(field, _)| *field == 6).and_then(|(_, v)| u32::try_from(*v).ok());
+                found = Some((gadget, group, config, state));
+            }
+        }
+        // The place is a message of floats in a message of its own.
+        if position.is_none() {
+            position = places.iter().find_map(|place| position_in(place));
+        }
+    }
+    let (gadget_id, group_id, config_id, state) = found?;
+    Some(SceneGadget {
+        entity_id: u32::try_from(entity_id).ok()?,
+        gadget_id: u32::try_from(gadget_id).ok()?,
+        group_id: u32::try_from(group_id).ok()?,
+        config_id: u32::try_from(config_id).ok()?,
+        position,
+        state,
+    })
+}
+
+/// The gadgets that came into view in this command, if it says that.  What it
+/// holds is a list of entities, most of which are not gadgets of the world.
+pub fn matches_scene_gadgets(data: &[u8]) -> Option<Vec<SceneGadget>> {
+    if data.len() < 40 {
+        return None;
+    }
+    let message = Unk::parse_from_bytes(data).ok()?;
+    let gadgets: Vec<SceneGadget> = message
+        .unknown_fields()
+        .iter()
+        .filter_map(|(_, value)| match value {
+            LengthDelimited(bytes) => scene_gadget(bytes),
+            _ => None,
+        })
+        .collect();
+    (!gadgets.is_empty()).then_some(gadgets)
+}
+
+/// Where a player is, as the game tells it every few seconds: the scene, who,
+/// and the place in the game's coordinates (x, height, z).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayerLocation {
+    pub scene: u32,
+    pub uid: u32,
+    pub position: [f32; 3],
+    /// The way the player faces, in degrees (0 is along z, 90 along x), if told.
+    pub yaw: Option<f32>,
+}
+
+/// The way round in a message of floats that has only that (the field 2).
+fn yaw_in(bytes: &[u8]) -> Option<f32> {
+    let message = Unk::parse_from_bytes(bytes).ok()?;
+    let mut yaw = None;
+    for (field, value) in message.unknown_fields().iter() {
+        match value {
+            Fixed32(bits) if field == 2 => {
+                let number = f32::from_bits(bits);
+                if !number.is_finite() || number.abs() > 3600. {
+                    return None;
+                }
+                yaw = Some(number);
+            }
+            Fixed32(_) if field == 1 || field == 3 => (),
+            _ => return None,
+        }
+    }
+    yaw
+}
+
+/// A quest (a step of a story) whose state the server says: its id, the state (1 not
+/// begun, 2 begun, 3 done, 4 failed), and the id of the story it is a step of.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuestUpdate {
+    pub quest: u32,
+    pub state: u32,
+    pub parent: u32,
+}
+
+/// The quests a message says the state of: each in a message of field 3 with the id
+/// (field 1), the state (field 2) and the story (field 6).  The whole list comes when
+/// logging in, and one or a few each time a quest changes.
+pub fn find_quest_updates(data: &[u8]) -> Vec<QuestUpdate> {
+    let Ok(message) = Unk::parse_from_bytes(data) else {
+        return Vec::new();
+    };
+    let mut updates = Vec::new();
+    for (field, value) in message.unknown_fields().iter() {
+        let LengthDelimited(part) = value else {
+            continue;
+        };
+        if field != 3 {
+            continue;
+        }
+        let Ok(quest) = Unk::parse_from_bytes(part) else {
+            continue;
+        };
+        let (mut id, mut state, mut parent) = (None, None, None);
+        for (f, v) in quest.unknown_fields().iter() {
+            if let Varint(v) = v {
+                match f {
+                    1 => id = Some(v),
+                    2 => state = Some(v),
+                    6 => parent = Some(v),
+                    _ => (),
+                }
+            }
+        }
+        if let (Some(id), Some(state), Some(parent)) = (id, state, parent)
+            && (1..=4).contains(&state)
+            && id >= 100
+            && id <= u64::from(u32::MAX)
+            && parent <= u64::from(u32::MAX)
+        {
+            updates.push(QuestUpdate { quest: id as u32, state: state as u32, parent: parent as u32 });
+        }
+    }
+    updates
+}
+
+/// Where a story of the quest list is for the player.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoryStatus {
+    /// Offered (it can be begun), with no step of it begun.
+    Available,
+    /// Some step of it is begun and not done.
+    InProgress,
+    /// All the steps it has are done.
+    Done,
+}
+
+/// A story of the quest list, as it is told when logging in: its id, since when (seconds),
+/// the status, and the steps that are not done, with their state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoryEntry {
+    pub story: u32,
+    pub since: u64,
+    pub status: StoryStatus,
+    pub steps: usize,
+    pub open_steps: Vec<(u32, u32)>,
+}
+
+/// The whole quest list: in field 9 each story (id in field 5, time in field 8) and, in its
+/// field 12, the steps it has (id in field 1, state in field 11, 3 being done).  A story with
+/// no steps is one that is offered.
+pub fn find_quest_list(data: &[u8]) -> Vec<StoryEntry> {
+    let Ok(message) = Unk::parse_from_bytes(data) else {
+        return Vec::new();
+    };
+    let mut stories = Vec::new();
+    for (field, value) in message.unknown_fields().iter() {
+        let LengthDelimited(part) = value else {
+            continue;
+        };
+        if field != 9 {
+            continue;
+        }
+        let Ok(story) = Unk::parse_from_bytes(part) else {
+            continue;
+        };
+        let (mut id, mut since) = (None, 0);
+        let (mut steps, mut open_steps) = (0usize, Vec::new());
+        for (f, v) in story.unknown_fields().iter() {
+            match v {
+                Varint(v) if f == 5 => id = Some(v as u32),
+                Varint(v) if f == 8 => since = v,
+                LengthDelimited(step) if f == 12 => {
+                    let Ok(step) = Unk::parse_from_bytes(step) else {
+                        continue;
+                    };
+                    let (mut quest, mut state) = (None, None);
+                    for (g, w) in step.unknown_fields().iter() {
+                        if let Varint(w) = w {
+                            match g {
+                                1 => quest = Some(w as u32),
+                                11 => state = Some(w as u32),
+                                _ => (),
+                            }
+                        }
+                    }
+                    steps += 1;
+                    if let (Some(quest), Some(state)) = (quest, state)
+                        && state != 3
+                    {
+                        open_steps.push((quest, state));
+                    }
+                }
+                _ => (),
+            }
+        }
+        let Some(story) = id else {
+            continue;
+        };
+        let status = if steps == 0 {
+            StoryStatus::Available
+        } else if open_steps.is_empty() {
+            StoryStatus::Done
+        } else {
+            StoryStatus::InProgress
+        };
+        stories.push(StoryEntry { story, since, status, steps, open_steps });
+    }
+    stories
+}
+
+/// A story (a quest of the quest list) and the state of the quests it has: field 2 of the
+/// message has the story (field 5), and in field 12 each quest (field 1) with its state
+/// (field 11).
+pub fn find_story_update(data: &[u8]) -> Option<(u32, Vec<(u32, u32)>)> {
+    let message = Unk::parse_from_bytes(data).ok()?;
+    for (field, value) in message.unknown_fields().iter() {
+        let LengthDelimited(part) = value else {
+            continue;
+        };
+        if field != 2 {
+            continue;
+        }
+        let story = Unk::parse_from_bytes(part).ok()?;
+        let mut id = None;
+        let mut quests = Vec::new();
+        for (f, v) in story.unknown_fields().iter() {
+            match v {
+                Varint(v) if f == 5 => id = Some(v as u32),
+                LengthDelimited(sub) if f == 12 => {
+                    let sub = Unk::parse_from_bytes(sub).ok()?;
+                    let (mut quest, mut state) = (None, None);
+                    for (g, w) in sub.unknown_fields().iter() {
+                        if let Varint(w) = w {
+                            match g {
+                                1 => quest = Some(w as u32),
+                                11 => state = Some(w as u32),
+                                _ => (),
+                            }
+                        }
+                    }
+                    if let (Some(quest), Some(state)) = (quest, state) {
+                        quests.push((quest, state));
+                    }
+                }
+                _ => (),
+            }
+        }
+        return id.map(|id| (id, quests));
+    }
+    None
+}
+
+/// Where an avatar is and which way it faces, as the client says it moves.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AvatarMotion {
+    pub entity: u32,
+    pub position: [f32; 3],
+    pub yaw: Option<f32>,
+}
+
+/// Entities of avatars have the kind 8 in their high byte.
+fn is_avatar_entity(entity: u64) -> bool {
+    entity >> 24 == 8
+}
+
+/// The motion of an avatar in a message (the id of the entity in field 1, and in field 2 the
+/// motion: the place in field 1 and the way round in field 2).  Looked for a few levels
+/// down, as the commands are put in other commands; the last one is taken.
+pub fn find_avatar_motion(data: &[u8]) -> Option<AvatarMotion> {
+    let mut found = None;
+    motion_in(data, 0, &mut found);
+    found
+}
+
+fn motion_in(bytes: &[u8], depth: u32, found: &mut Option<AvatarMotion>) {
+    let Ok(message) = Unk::parse_from_bytes(bytes) else {
+        return;
+    };
+    let mut entity = None;
+    let mut motion: Option<&[u8]> = None;
+    let mut inner: Vec<Vec<u8>> = Vec::new();
+    for (field, value) in message.unknown_fields().iter() {
+        match value {
+            Varint(v) if field == 1 && is_avatar_entity(v) => entity = Some(v as u32),
+            LengthDelimited(part) => {
+                if field == 2 && motion.is_none() {
+                    motion = Some(part);
+                }
+                if depth < 7 && part.len() > 4 {
+                    inner.push(part.to_vec());
+                }
+            }
+            _ => (),
+        }
+    }
+    if let (Some(entity), Some(motion)) = (entity, motion)
+        && let Ok(info) = Unk::parse_from_bytes(motion)
+    {
+        let mut position = None;
+        let mut yaw = None;
+        for (field, value) in info.unknown_fields().iter() {
+            if let LengthDelimited(part) = value {
+                if field == 1 {
+                    position = place_in(part);
+                } else if field == 2 {
+                    yaw = yaw_in(part);
+                }
+            }
+        }
+        if let Some(position) = position {
+            *found = Some(AvatarMotion { entity, position, yaw });
+            return;
+        }
+    }
+    for part in inner {
+        motion_in(&part, depth + 1, found);
+    }
+}
+
+/// The place in a message of floats: the one with an x and a z (the direction
+/// a player faces has only the way round, as the rest is zero, and zeros are
+/// not told).
+fn place_in(bytes: &[u8]) -> Option<[f32; 3]> {
+    let message = Unk::parse_from_bytes(bytes).ok()?;
+    let mut numbers = [None; 3];
+    for (field, value) in message.unknown_fields().iter() {
+        if let Fixed32(bits) = value
+            && (1..=3).contains(&field)
+        {
+            let number = f32::from_bits(bits);
+            if !number.is_finite() || number.abs() > 100_000. {
+                return None;
+            }
+            numbers[field as usize - 1] = Some(number);
+        }
+    }
+    let [Some(x), y, Some(z)] = numbers else {
+        return None;
+    };
+    Some([x, y.unwrap_or(0.), z])
+}
+
+/// Where a teleport goes: the scene, and the number of the point in it (the
+/// waypoint).  The game says it just before it changes the scene, in a short
+/// message of the scene (field 2) and the point (field 5).
+pub fn find_teleport_target(data: &[u8]) -> Option<(u32, u32)> {
+    if data.len() > 40 {
+        return None;
+    }
+    let message = Unk::parse_from_bytes(data).ok()?;
+    let (mut scene, mut point) = (None, None);
+    for (field, value) in message.unknown_fields().iter() {
+        if let Varint(v) = value {
+            match field {
+                2 => scene = Some(v),
+                5 => point = Some(v),
+                _ => (),
+            }
+        }
+    }
+    let (scene, point) = (scene?, point?);
+    ((1..=5_000).contains(&scene) && (1..=100_000).contains(&point)).then_some((scene as u32, point as u32))
+}
+
+/// Where the player comes in when the scene changes: the scene (said as text
+/// that begins with it, field 293) and the place (field 14).
+pub fn find_scene_arrival(data: &[u8]) -> Option<(u32, [f32; 3])> {
+    let message = Unk::parse_from_bytes(data).ok()?;
+    let mut scene = None;
+    let mut place = None;
+    for (field, value) in message.unknown_fields().iter() {
+        if let LengthDelimited(bytes) = value {
+            if field == 293 {
+                let text = std::str::from_utf8(&bytes).ok()?;
+                scene = text.split('-').next()?.parse::<u32>().ok();
+            } else if field == 14 {
+                place = position_in(&bytes);
+            }
+        }
+    }
+    Some((scene?, place?))
+}
+
+/// The message that says where a player is: the scene (a small number), and a
+/// message of the player in which are the id of the player and the place.
+pub fn matches_player_location(data: &[u8]) -> Option<PlayerLocation> {
+    matches_player_location_of(data, None)
+}
+
+/// A player in a message: the id (the one that is `expected`, if it is among
+/// the numbers that can be ids, else the first), and the place.  The message
+/// may have the player in a message of its own, a level or two down.
+fn player_in(bytes: &[u8], expected: Option<u64>, depth: u32) -> Option<(u64, [f32; 3], Option<f32>)> {
+    let player = Unk::parse_from_bytes(bytes).ok()?;
+    let mut uids = Vec::new();
+    let mut places = Vec::new();
+    let mut yaw = None;
+    let mut nested = Vec::new();
+    for (_, value) in player.unknown_fields().iter() {
+        match value {
+            Varint(v) if UID_RANGE.contains(&v) => uids.push(v),
+            LengthDelimited(part) => {
+                if let Some(place) = place_in(part) {
+                    places.push(place);
+                } else if let Some(turn) = yaw_in(part) {
+                    yaw = yaw.or(Some(turn));
+                } else if depth < 2 && part.len() > 4 {
+                    nested.push(part.to_vec());
+                }
+            }
+            _ => (),
+        }
+    }
+    // Of the messages that can be a place, the one that is far from the middle
+    // of the world is the place.
+    places.sort_by(|a, b| {
+        (b[0].abs() + b[2].abs())
+            .partial_cmp(&(a[0].abs() + a[2].abs()))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let uid = expected.filter(|expected| uids.contains(expected)).or_else(|| uids.first().copied());
+    if let (Some(uid), Some(position)) = (uid, places.first()) {
+        return Some((uid, *position, yaw));
+    }
+    nested.iter().find_map(|inner| player_in(inner, expected, depth + 1))
+}
+
+/// Where a player is, as `matches_player_location`, with the id of the account
+/// that is followed given, so that it is that id that is taken when the message
+/// has more than one number that can be one.
+pub fn matches_player_location_of(data: &[u8], expected: Option<u32>) -> Option<PlayerLocation> {
+    if data.len() > 600 {
+        return None;
+    }
+    let message = Unk::parse_from_bytes(data).ok()?;
+    let mut scene = None;
+    let mut inner = Vec::new();
+    for (_, value) in message.unknown_fields().iter() {
+        match value {
+            Varint(v) if (1..=2000).contains(&v) && scene.is_none() => scene = Some(v),
+            Varint(_) => (),
+            LengthDelimited(bytes) => inner.push(bytes.to_vec()),
+            _ => return None,
+        }
+    }
+    let scene = scene?;
+    for bytes in &inner {
+        if let Some((uid, position, yaw)) = player_in(bytes, expected.map(u64::from), 0) {
+            return Some(PlayerLocation {
+                yaw,
+                scene: u32::try_from(scene).ok()?,
+                uid: u32::try_from(uid).ok()?,
+                position,
+            });
+        }
+    }
+    None
+}
+
+/// What the game answers when something in the world is used: a chest opened,
+/// an item picked up.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GadgetInteraction {
+    pub gadget_id: u32,
+    pub entity_id: u32,
+    /// What was done: 3 is opening a chest, 1 picking something up.
+    pub kind: u64,
+    /// The answer comes twice for a chest: first as the opening begins, then
+    /// when it is done.  This is the first.
+    pub begins: bool,
+}
+
+pub fn matches_gadget_interaction(data: &[u8]) -> Option<GadgetInteraction> {
+    if data.len() > 60 {
+        return None;
+    }
+    let message = Unk::parse_from_bytes(data).ok()?;
+    let (mut gadget, mut entity, mut kind) = (None, None, None);
+    let mut threes = 0;
+    for (field, value) in message.unknown_fields().iter() {
+        match value {
+            Varint(v) if GADGET_IDS.contains(&v) && gadget.is_none() => gadget = Some(v),
+            Varint(v) if ENTITY_IDS.contains(&v) && entity.is_none() => entity = Some(v),
+            Varint(v) if field == 12 => kind = Some(v),
+            // The first field with a 3 is the number of the packet.
+            Varint(_) if field == 3 => threes += 1,
+            Varint(_) => (),
+            // Something that is not only numbers is another kind of message.
+            _ => return None,
+        }
+    }
+    Some(GadgetInteraction {
+        gadget_id: u32::try_from(gadget?).ok()?,
+        entity_id: u32::try_from(entity?).ok()?,
+        kind: kind?,
+        begins: threes >= 2,
+    })
+}
+
 pub fn matches_avatars_all_data_notify(data: &[u8]) -> Option<Vec<AvatarInfo>> {
     let avatars = find_best_field::<AvatarInfo>(data, |avatar| {
         avatar.avatar_id != 0
@@ -393,8 +970,12 @@ pub fn matches_avatars_all_data_notify(data: &[u8]) -> Option<Vec<AvatarInfo>> {
     Some(avatars)
 }
 
-/// Player ids have nine digits.
-const UID_RANGE: std::ops::RangeInclusive<u64> = 100_000_000..=999_999_999;
+/// Player ids have nine digits, or ten for the newer accounts of the Asian
+/// server (which begin with 18).  Times in seconds have ten digits as well.
+const UID_RANGE: std::ops::RangeInclusive<u64> = 100_000_000..=4_294_967_295;
+
+/// A number this close to the time (in seconds) is the time, not an id.
+const TIME_MARGIN: u64 = 3 * 24 * 3600;
 
 /// Every varint of `data` read as a generic message, going into nested
 /// messages down to `max_level`, as (level, field number, value).
@@ -414,16 +995,50 @@ fn varints_at(data: &[u8], level: u32, max_level: u32, found: &mut Vec<(u32, u32
 }
 
 /// The player's id in the body of the server's answer to the token request:
-/// the only number with nine digits in it.  Matched by content, as field
-/// numbers change with the game version.
-pub fn find_player_uid(body: &[u8]) -> Option<u32> {
+/// the number that has the digits of an id (nine or ten), and is not the time.
+/// Matched by content, as field numbers change with the game version.
+/// `time` is the time of the packet, in seconds, if it is known.
+pub fn find_player_uid(body: &[u8], time: Option<u64>) -> Option<u32> {
+    let now = time.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs())
+    });
     let mut found = Vec::new();
     varints_at(body, 0, 1, &mut found);
     found
         .into_iter()
-        .filter(|(_, _, value)| UID_RANGE.contains(value))
+        .filter(|(_, _, value)| UID_RANGE.contains(value) && value.abs_diff(now) > TIME_MARGIN)
         .min_by_key(|(level, _, _)| *level)
         .map(|(_, _, value)| value as u32)
+}
+
+/// The id of the player whose name is `name`: a message that has the name in
+/// it, and an id next to it.  The game says this of the player in a few
+/// messages (a card of the player, the friends), whatever the server is.
+pub fn find_uid_beside_name(body: &[u8], name: &str) -> Option<u32> {
+    fn search(data: &[u8], name: &[u8], level: u32) -> Option<u32> {
+        let message = Unk::parse_from_bytes(data).ok()?;
+        let mut named = false;
+        let mut ids = Vec::new();
+        let mut nested = Vec::new();
+        for (_, value) in message.unknown_fields().iter() {
+            match value {
+                LengthDelimited(bytes) if bytes == name => named = true,
+                LengthDelimited(bytes) if level < 4 && bytes.len() > 4 => nested.push(bytes.to_vec()),
+                Varint(v) if UID_RANGE.contains(&v) => ids.push(v),
+                _ => (),
+            }
+        }
+        if named && let Some(&id) = ids.first() {
+            return u32::try_from(id).ok();
+        }
+        nested.iter().find_map(|inner| search(inner, name, level + 1))
+    }
+    if name.is_empty() || body.len() > 200_000 {
+        return None;
+    }
+    search(body, name.as_bytes(), 0)
 }
 
 /// A string that can be a player's name.
@@ -623,6 +1238,205 @@ mod tests {
                 avatar.write_to_bytes().unwrap()
             })
             .collect()
+    }
+
+    /// A chest as the game told about it (an entity of a message with many).
+    const CHEST_ENTITY: &str = "080410eeb2808002221c0a0f0d8d3f1a4515444b4e431df4499ac41205154a4cb3421a0032002a0c08a11f120708a11f100120013207080115804fc347320208043202080732020817320808d00f15804fc347320308d10f320308d20f320308d30f320308e40f320308e517320808e617150000803f320808f20715804fc347320308d40f38016a1108baabbd2110f2f0b53f18bc20480150019a0100aa01190a00220f0d8d3f1a4515444b4e431df4499ac432020a003a00ca011c12140884d1960110d6cb0c18f9d4b4ffffffffffff011a0410b1bc05";
+
+    fn from_hex(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&text[at..at + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn a_chest_in_view_is_read_with_its_place() {
+        let data = packet(2, &[from_hex(CHEST_ENTITY)]);
+        let gadgets = matches_scene_gadgets(&data).unwrap();
+        assert_eq!(gadgets.len(), 1);
+        let chest = &gadgets[0];
+        assert_eq!(chest.entity_id, 536_877_422);
+        assert_eq!(chest.gadget_id, 70_211_002);
+        assert_eq!(chest.group_id, 133_003_378);
+        assert_eq!(chest.config_id, 4156);
+        let [x, y, z] = chest.position.unwrap();
+        assert!((x - 2468.0).abs() < 0.5 && (y - 206.3).abs() < 0.5 && (z + 1234.3).abs() < 0.5);
+    }
+
+    /// Runs the matchers over a probe-raw log (`IRMINSUL_RAW_LOG=path`), to see
+    /// what they find in real traffic.  Not run by default.
+    #[test]
+    #[ignore]
+    fn the_matchers_over_a_raw_log() {
+        let Ok(path) = std::env::var("IRMINSUL_RAW_LOG") else {
+            return;
+        };
+        let text = std::fs::read_to_string(path).unwrap();
+        for line in text.lines() {
+            let mut parts = line.splitn(4, ' ');
+            let (Some(time), Some(command), Some(_), Some(hex)) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            let Some(command) = command.strip_prefix("cmd=") else {
+                continue;
+            };
+            let data = from_hex(hex);
+            if let Some(gadgets) = matches_scene_gadgets(&data) {
+                println!("{time} cmd {command}: {} gadgets, first {:?}", gadgets.len(), gadgets[0]);
+            }
+            if let Some(event) = matches_gadget_interaction(&data) {
+                println!("{time} cmd {command}: {event:?}");
+            }
+            if let Some(location) = matches_player_location(&data) {
+                println!("{time} cmd {command}: {location:?}");
+            }
+            if let Ok(name) = std::env::var("IRMINSUL_RAW_NAME")
+                && let Some(uid) = find_uid_beside_name(&data, &name)
+            {
+                println!("{time} cmd {command}: id {uid} beside the name");
+            }
+        }
+    }
+
+    #[test]
+    fn where_a_player_is_is_read_from_the_message_of_a_few_seconds() {
+        // As the game said it: the scene, and a message with the id of the
+        // player, the way the player faces (only the y, as the rest is zero)
+        // and the place.
+        let mut place = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut place);
+            writer.write_fixed32(1, 2481.0_f32.to_bits()).unwrap();
+            writer.write_fixed32(2, 207.0_f32.to_bits()).unwrap();
+            writer.write_fixed32(3, (-1242.0_f32).to_bits()).unwrap();
+            writer.flush().unwrap();
+        }
+        let mut facing = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut facing);
+            writer.write_fixed32(2, 94.5_f32.to_bits()).unwrap();
+            writer.flush().unwrap();
+        }
+        let mut player = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut player);
+            writer.write_uint32(6, 1_826_078_112).unwrap();
+            writer.write_bytes(13, &facing).unwrap();
+            writer.write_bytes(14, &place).unwrap();
+            writer.flush().unwrap();
+        }
+        let mut message = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut message);
+            writer.write_uint32(1, 3).unwrap();
+            writer.write_bytes(4, &player).unwrap();
+            writer.flush().unwrap();
+        }
+        let location = matches_player_location(&message).unwrap();
+        assert_eq!(location.scene, 3);
+        assert_eq!(location.uid, 1_826_078_112);
+        assert_eq!(location.position, [2481.0, 207.0, -1242.0]);
+        assert_eq!(location.yaw, Some(94.5));
+        // Items and the like are not where a player is.
+        assert!(matches_player_location(&packet(2, &items(2))).is_none());
+        assert!(matches_player_location(&[]).is_none());
+    }
+
+    /// The place of a player, in a message that has more than the id and the place.
+    fn location_message(uid: u32, other: u32, nested: bool, padding: usize) -> Vec<u8> {
+        let mut place = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut place);
+            writer.write_fixed32(1, 2481.0_f32.to_bits()).unwrap();
+            writer.write_fixed32(2, 207.0_f32.to_bits()).unwrap();
+            writer.write_fixed32(3, (-1242.0_f32).to_bits()).unwrap();
+            writer.flush().unwrap();
+        }
+        let mut player = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut player);
+            // A number that could be an id, before the real one.
+            writer.write_uint32(2, other).unwrap();
+            writer.write_uint32(6, uid).unwrap();
+            writer.write_bytes(14, &place).unwrap();
+            writer.write_bytes(15, &vec![7u8; padding]).unwrap();
+            writer.flush().unwrap();
+        }
+        let wrapped = if nested {
+            let mut wrapper = Vec::new();
+            {
+                let mut writer = CodedOutputStream::vec(&mut wrapper);
+                writer.write_uint32(1, 5).unwrap();
+                writer.write_bytes(2, &player).unwrap();
+                writer.flush().unwrap();
+            }
+            wrapper
+        } else {
+            player
+        };
+        let mut message = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut message);
+            writer.write_uint32(1, 3).unwrap();
+            writer.write_bytes(4, &wrapped).unwrap();
+            writer.flush().unwrap();
+        }
+        message
+    }
+
+    #[test]
+    fn a_players_place_is_read_whatever_the_id_is_and_however_it_is_wrapped() {
+        // An id of nine digits, a bigger message, another number that could be an id.
+        let message = location_message(700_807_762, 3_300_000_000, false, 150);
+        assert!(message.len() > 120);
+        let found = matches_player_location_of(&message, Some(700_807_762)).unwrap();
+        assert_eq!(found.uid, 700_807_762, "the id that is expected is taken");
+        assert_eq!(found.position, [2481.0, 207.0, -1242.0]);
+        // Without being told which, the first is taken (as it was).
+        assert_eq!(matches_player_location_of(&message, None).unwrap().uid, 3_300_000_000);
+        // The player one message further down.
+        let nested = location_message(700_807_762, 3_300_000_000, true, 0);
+        assert_eq!(matches_player_location_of(&nested, Some(700_807_762)).unwrap().uid, 700_807_762);
+    }
+
+    #[test]
+    fn what_is_not_a_gadget_in_view_is_not_taken() {
+        // Items and avatars are lists too, and are not gadgets.
+        assert!(matches_scene_gadgets(&packet(2, &items(25))).is_none());
+        assert!(matches_scene_gadgets(&packet(2, &avatars(5))).is_none());
+    }
+
+    fn interaction(begins: bool, gadget: u32, kind: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut out);
+            writer.write_uint32(3, 912).unwrap();
+            writer.write_uint64(6, 1_794_065_943_402).unwrap();
+            writer.write_uint32(2, gadget).unwrap();
+            if begins {
+                writer.write_uint32(3, 1).unwrap();
+            }
+            writer.write_uint32(8, 536_877_422).unwrap();
+            writer.write_uint32(12, kind).unwrap();
+            writer.flush().unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn opening_a_chest_is_told_twice() {
+        let begins = matches_gadget_interaction(&interaction(true, 70_211_002, 3)).unwrap();
+        assert_eq!(begins.gadget_id, 70_211_002);
+        assert_eq!(begins.entity_id, 536_877_422);
+        assert_eq!(begins.kind, 3);
+        assert!(begins.begins);
+        let done = matches_gadget_interaction(&interaction(false, 70_211_002, 3)).unwrap();
+        assert!(!done.begins);
+        let pickup = matches_gadget_interaction(&interaction(false, 70_600_041, 1)).unwrap();
+        assert_eq!(pickup.kind, 1);
     }
 
     #[test]
@@ -932,9 +1746,66 @@ mod tests {
 
     #[test]
     fn the_player_id_is_the_nine_digit_number() {
-        assert_eq!(find_player_uid(&token_response(Some(700_807_765))), Some(700_807_765));
-        assert_eq!(find_player_uid(&token_response(None)), None);
-        assert_eq!(find_player_uid(&[]), None);
+        assert_eq!(find_player_uid(&token_response(Some(700_807_765)), None), Some(700_807_765));
+        assert_eq!(find_player_uid(&token_response(None), None), None);
+        assert_eq!(find_player_uid(&[], None), None);
+    }
+
+    #[test]
+    fn an_id_of_ten_digits_is_not_taken_for_the_time() {
+        // The time (field 7) is in the body too, and sorts the same as an id.
+        // The id is told from it by the time of the packet.
+        let time = Some(1_793_892_912);
+        assert_eq!(
+            find_player_uid(&token_response(Some(1_826_078_112)), time),
+            Some(1_826_078_112)
+        );
+        // Whichever comes first in the message.
+        let mut out = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut out);
+            writer.write_uint64(2, 1_793_892_910).unwrap();
+            writer.write_uint32(4, 1_826_078_112).unwrap();
+            writer.flush().unwrap();
+        }
+        assert_eq!(find_player_uid(&out, time), Some(1_826_078_112));
+        // And with no time at all, nothing but a time is no id.
+        let mut only_time = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut only_time);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            writer.write_uint64(2, now).unwrap();
+            writer.flush().unwrap();
+        }
+        assert_eq!(find_player_uid(&only_time, None), None);
+    }
+
+    #[test]
+    fn the_id_is_found_next_to_the_name() {
+        // As in a card of the player: the id, then the name, in a message in
+        // a message.
+        let mut card = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut card);
+            writer.write_uint32(1, 1_826_078_112).unwrap();
+            writer.write_string(2, "neiroromo").unwrap();
+            writer.write_uint32(3, 3).unwrap();
+            writer.write_uint32(9, 210_001).unwrap();
+            writer.flush().unwrap();
+        }
+        let mut outer = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut outer);
+            writer.write_uint32(3, 912).unwrap();
+            writer.write_bytes(13, &card).unwrap();
+            writer.flush().unwrap();
+        }
+        assert_eq!(find_uid_beside_name(&outer, "neiroromo"), Some(1_826_078_112));
+        assert_eq!(find_uid_beside_name(&outer, "someone else"), None);
+        assert_eq!(find_uid_beside_name(&outer, ""), None);
     }
 
     #[test]
@@ -946,7 +1817,7 @@ mod tests {
             writer.write_bytes(3, &token_response(Some(812_345_678))).unwrap();
             writer.flush().unwrap();
         }
-        assert_eq!(find_player_uid(&out), Some(812_345_678));
+        assert_eq!(find_player_uid(&out, None), Some(812_345_678));
     }
 
     #[test]
@@ -973,5 +1844,165 @@ mod tests {
         assert_eq!(find_player_nickname(&player_data(None, 8)), None);
         assert_eq!(find_player_nickname(&player_data(Some("123456789"), 8)), None);
         assert_eq!(find_player_nickname(&[]), None);
+    }
+
+    #[test]
+    fn the_motion_of_the_avatar_is_read_from_what_the_client_sends() {
+        let mut place = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut place);
+            writer.write_fixed32(1, 2101.435_f32.to_bits()).unwrap();
+            writer.write_fixed32(2, 214.395_f32.to_bits()).unwrap();
+            writer.write_fixed32(3, (-1362.494_f32).to_bits()).unwrap();
+            writer.flush().unwrap();
+        }
+        let mut turn = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut turn);
+            writer.write_fixed32(2, 301.364_f32.to_bits()).unwrap();
+            writer.flush().unwrap();
+        }
+        let mut motion = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut motion);
+            writer.write_bytes(1, &place).unwrap();
+            writer.write_bytes(2, &turn).unwrap();
+            writer.write_uint32(4, 2).unwrap();
+            writer.flush().unwrap();
+        }
+        let mut entity = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut entity);
+            writer.write_uint32(1, 134_229_199).unwrap();
+            writer.write_bytes(2, &motion).unwrap();
+            writer.flush().unwrap();
+        }
+        // Put in other messages, as it is.
+        let mut level = entity;
+        for _ in 0..3 {
+            let mut outer = Vec::new();
+            {
+                let mut writer = CodedOutputStream::vec(&mut outer);
+                writer.write_uint32(6, 7).unwrap();
+                writer.write_bytes(8, &level).unwrap();
+                writer.flush().unwrap();
+            }
+            level = outer;
+        }
+        let found = find_avatar_motion(&level).expect("a motion");
+        assert_eq!(found.entity, 134_229_199);
+        assert_eq!(found.position, [2101.435, 214.395, -1362.494]);
+        assert_eq!(found.yaw, Some(301.364));
+        // The entity of something else (a monster, 0x20 high) is not the avatar.
+        let mut other = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut other);
+            writer.write_uint32(1, 536_870_913).unwrap();
+            writer.write_bytes(2, &motion).unwrap();
+            writer.flush().unwrap();
+        }
+        assert!(find_avatar_motion(&other).is_none());
+    }
+
+    #[test]
+    fn the_state_of_quests_is_read() {
+        let mut quest = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut quest);
+            writer.write_uint32(1, 30803).unwrap();
+            writer.write_uint32(2, 3).unwrap();
+            writer.write_uint32(6, 308).unwrap();
+            writer.write_uint32(8, 11882).unwrap();
+            writer.flush().unwrap();
+        }
+        let mut other = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut other);
+            writer.write_uint32(1, 30804).unwrap();
+            writer.write_uint32(2, 2).unwrap();
+            writer.write_uint32(6, 308).unwrap();
+            writer.flush().unwrap();
+        }
+        let mut message = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut message);
+            writer.write_uint64(6, 1_794_137_655_051).unwrap();
+            writer.write_bytes(3, &quest).unwrap();
+            writer.write_bytes(3, &other).unwrap();
+            writer.flush().unwrap();
+        }
+        assert_eq!(
+            find_quest_updates(&message),
+            vec![
+                QuestUpdate { quest: 30803, state: 3, parent: 308 },
+                QuestUpdate { quest: 30804, state: 2, parent: 308 }
+            ]
+        );
+    }
+
+    #[test]
+    fn the_quests_of_a_story_are_read() {
+        let mut quest = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut quest);
+            writer.write_uint32(1, 35721).unwrap();
+            writer.write_uint32(11, 3).unwrap();
+            writer.flush().unwrap();
+        }
+        let mut story = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut story);
+            writer.write_uint32(1, 1).unwrap();
+            writer.write_uint32(5, 357).unwrap();
+            writer.write_bytes(12, &quest).unwrap();
+            writer.flush().unwrap();
+        }
+        let mut message = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut message);
+            writer.write_bytes(2, &story).unwrap();
+            writer.flush().unwrap();
+        }
+        assert_eq!(find_story_update(&message), Some((357, vec![(35721, 3)])));
+    }
+
+    #[test]
+    fn the_quest_list_tells_done_begun_and_offered_stories() {
+        let step = |id: u32, state: u32| {
+            let mut bytes = Vec::new();
+            {
+                let mut writer = CodedOutputStream::vec(&mut bytes);
+                writer.write_uint32(1, id).unwrap();
+                writer.write_uint32(11, state).unwrap();
+                writer.flush().unwrap();
+            }
+            bytes
+        };
+        let story = |id: u32, steps: &[Vec<u8>]| {
+            let mut bytes = Vec::new();
+            {
+                let mut writer = CodedOutputStream::vec(&mut bytes);
+                writer.write_uint32(5, id).unwrap();
+                writer.write_uint64(8, 1_794_137_749).unwrap();
+                for step in steps {
+                    writer.write_bytes(12, step).unwrap();
+                }
+                writer.flush().unwrap();
+            }
+            bytes
+        };
+        let mut message = Vec::new();
+        {
+            let mut writer = CodedOutputStream::vec(&mut message);
+            writer.write_bytes(9, &story(20030, &[step(2003001, 3), step(2003002, 3)])).unwrap();
+            writer.write_bytes(9, &story(306, &[step(30601, 3), step(30609, 2)])).unwrap();
+            writer.write_bytes(9, &story(71005, &[])).unwrap();
+            writer.flush().unwrap();
+        }
+        let list = find_quest_list(&message);
+        assert_eq!(list.len(), 3);
+        assert_eq!((list[0].story, list[0].status), (20030, StoryStatus::Done));
+        assert_eq!((list[1].story, list[1].status, list[1].open_steps.clone()), (306, StoryStatus::InProgress, vec![(30609, 2)]));
+        assert_eq!((list[2].story, list[2].status), (71005, StoryStatus::Available));
     }
 }

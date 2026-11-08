@@ -61,6 +61,9 @@ pub struct SavedAppState {
     /// Hide the window in the tray when the game is started from here.
     #[serde(default)]
     minimize_on_launch: bool,
+    /// Keep HoYoPlay's window out of sight (in its tray) when it is started from here.
+    #[serde(default = "yes")]
+    hide_launcher: bool,
     log_raw_packets: bool,
     #[serde(default)]
     tracing_level: TracingLevel,
@@ -110,6 +113,7 @@ impl Default for SavedAppState {
             power_tools_on_top: false,
             hoyoplay_dir: String::new(),
             minimize_on_launch: false,
+            hide_launcher: true,
             log_raw_packets: false,
             tracing_level: Default::default(),
             achievement_progress: Default::default(),
@@ -125,6 +129,8 @@ enum MainTab {
     Characters,
     Materials,
     Planner,
+    Chests,
+    Map,
 }
 
 #[derive(Clone, Debug)]
@@ -161,6 +167,8 @@ pub struct IrminsulApp {
     main_tab: MainTab,
     achievement_tab: AchievementTab,
     roster_tab: RosterTab,
+    chests_tab: crate::chests_tab::ChestsTab,
+    map_tab: crate::map_tab::MapTab,
 
     restarting: bool,
     /// Set when quitting for real, as opposed to hiding in the tray.
@@ -345,10 +353,14 @@ impl IrminsulApp {
                 Ok("characters") => MainTab::Characters,
                 Ok("materials") => MainTab::Materials,
                 Ok("planner") => MainTab::Planner,
+                Ok("chests") => MainTab::Chests,
+                Ok("map") => MainTab::Map,
                 _ => MainTab::Export,
             },
             achievement_tab: AchievementTab::new(),
             roster_tab: RosterTab::new(&cc.egui_ctx),
+            chests_tab: crate::chests_tab::ChestsTab::new(),
+            map_tab: crate::map_tab::MapTab::new(&cc.egui_ctx),
             restarting: false,
             quitting: false,
             tray: Tray::new(&cc.egui_ctx),
@@ -466,6 +478,18 @@ impl eframe::App for IrminsulApp {
                                 &state.roster,
                                 &mut self.saved_state.achievement_progress.language,
                             ),
+                            MainTab::Chests => self.chests_tab.ui(
+                                ui,
+                                &state.chests,
+                                &mut self.saved_state.achievement_progress.language,
+                            ),
+                            MainTab::Map => self.map_tab.ui(
+                                ui,
+                                &state.chests,
+                                &state.chest_marks,
+                                state.player,
+                                &mut self.saved_state.achievement_progress.language,
+                            ),
                             _ => self.achievement_tab.ui(
                                 ui,
                                 &mut self.saved_state.achievement_progress,
@@ -547,6 +571,19 @@ impl eframe::App for IrminsulApp {
             &roster,
             self.saved_state.achievement_progress.language,
         );
+        {
+            let (chests, marks, player) = {
+                let state = self.state_rx.borrow();
+                (state.chests.clone(), state.chest_marks.clone(), state.player)
+            };
+            self.map_tab.overlay_frame(
+                ctx,
+                &chests,
+                &marks,
+                player,
+                self.saved_state.achievement_progress.language,
+            );
+        }
         let changes = self.state_rx.borrow().changes.clone();
         self.changes_popup.update(
             ctx,
@@ -659,6 +696,8 @@ impl IrminsulApp {
                         (MainTab::Characters, "Characters"),
                         (MainTab::Materials, "Materials"),
                         (MainTab::Planner, "Planner"),
+                        (MainTab::Chests, "Chests"),
+                        (MainTab::Map, "Map"),
                     ] {
                         ui.selectable_value(
                             &mut self.main_tab,
@@ -960,7 +999,7 @@ impl IrminsulApp {
                 ui.add_space(6.);
                 ui.horizontal(|ui| {
                     if ui.button("Close them and start").clicked() {
-                        crate::game_launch::run(dir.clone(), self.launch_status.clone());
+                        crate::game_launch::run(dir.clone(), self.launch_status.clone(), self.saved_state.hide_launcher);
                         self.launch_confirm = None;
                         self.minimize_for_launch(ui.ctx());
                     }
@@ -1108,7 +1147,7 @@ impl IrminsulApp {
         };
         let running = crate::game_launch::find_running(&dir);
         if running.is_empty() {
-            crate::game_launch::run(dir, self.launch_status.clone());
+            crate::game_launch::run(dir, self.launch_status.clone(), self.saved_state.hide_launcher);
             self.minimize_for_launch(ctx);
         } else {
             self.launch_confirm = Some((dir, running));
@@ -1381,7 +1420,7 @@ impl IrminsulApp {
 
     /// Markers for the debug timeline, and the latest lines of it.
     fn debug_timeline_ui(&mut self, ui: &mut egui::Ui) {
-        const MARKS: [&str; 7] = [
+        const MARKS: [&str; 12] = [
             "HoYoPlay opened",
             "Play pressed",
             "Game window shown",
@@ -1389,6 +1428,11 @@ impl IrminsulApp {
             "Door clicked",
             "World loaded",
             "Logged out",
+            "Chest opened",
+            "Chest opened (primogems)",
+            "Closed chest next to it",
+            "Teleported away",
+            "Teleported back",
         ];
 
         ui.label(RichText::new("Debug timeline").size(16.));
@@ -1438,7 +1482,9 @@ impl IrminsulApp {
             RichText::new(
                 "While on, commands that carry items, player properties, characters or the \
                  numbers below are written as lines of text to probe-<date>.log in the log \
-                 folder: ids and counts, not raw packets. Nothing is sent anywhere.",
+                 folder: ids and counts. After each mark below, and for the first minutes of a \
+                 game session, some messages are also kept whole, as hex, in probe-raw-<date>.log. \
+                 Both stay on this computer; nothing is sent anywhere.",
             )
             .size(12.),
         );
@@ -1537,6 +1583,10 @@ impl IrminsulApp {
                 }
             });
         });
+        ui.checkbox(
+            &mut self.saved_state.hide_launcher,
+            "Keep HoYoPlay's window out of sight (in its tray) when the game is started from here",
+        );
         ui.add_enabled_ui(self.tray.is_some(), |ui| {
             ui.checkbox(
                 &mut self.saved_state.close_to_tray,
@@ -1837,4 +1887,8 @@ impl IrminsulApp {
     fn section_header(ui: &mut egui::Ui, name: &str) {
         ui.label(RichText::new(name).size(18.));
     }
+}
+
+fn yes() -> bool {
+    true
 }

@@ -245,13 +245,6 @@ impl PlayerData {
         }
     }
 
-    /// Whether this is an item the account has or the data knows of, which is
-    /// what an update of a stack is about.
-    pub fn knows_item(&self, item_id: u32) -> bool {
-        self.items.iter().any(|item| item.item_id == item_id)
-            || crate::upgrade_store::data().materials.contains_key(&item_id)
-    }
-
     pub fn process_items(&mut self, items: &[Item]) -> bool {
         if items.len() * 2 < self.item_baseline {
             return false;

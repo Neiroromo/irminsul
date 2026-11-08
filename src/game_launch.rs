@@ -107,6 +107,18 @@ pub fn game_running() -> bool {
         .any(|(_, name)| GAME_PROGRAMS.contains(&name.to_lowercase().as_str()))
 }
 
+/// For this long, HoYoPlay's windows are hidden whenever they show; the program goes
+/// on in its tray.
+fn hide_while(dir: &Path, hide: bool, long: Duration) {
+    let started = Instant::now();
+    while started.elapsed() < long {
+        if hide {
+            platform::hide_launcher_windows(dir);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 fn set(status: &SharedStatus, value: Status) {
     if let Ok(mut status) = status.lock() {
         *status = value;
@@ -115,7 +127,7 @@ fn set(status: &SharedStatus, value: Status) {
 
 /// Closes what is running, starts HoYoPlay, waits for it, starts the game.  It
 /// runs in a thread of its own; `status` tells how it is going.
-pub fn run(dir: PathBuf, status: SharedStatus) {
+pub fn run(dir: PathBuf, status: SharedStatus, hide_launcher: bool) {
     std::thread::spawn(move || {
         let result = (|| -> Result<(), String> {
             let launcher = dir.join("launcher.exe");
@@ -145,16 +157,19 @@ pub fn run(dir: PathBuf, status: SharedStatus) {
                 if started.elapsed() > Duration::from_secs(60) {
                     return Err("HoYoPlay did not come up".to_owned());
                 }
-                std::thread::sleep(Duration::from_millis(500));
+                // Out of sight as soon as it shows (it stays in its tray).
+                std::thread::sleep(Duration::from_millis(250));
             }
-            // It is up, and is given a moment to be ready.
-            std::thread::sleep(Duration::from_secs(4));
+            // It is up, and is given a moment to be ready (and kept out of sight, if it
+            // is to be: its window is shown again as the game starts, for a while).
+            hide_while(&dir, hide_launcher, Duration::from_secs(4));
 
             set(&status, Status::Working("Starting the game".to_owned()));
             std::process::Command::new(&game)
                 .current_dir(game.parent().unwrap_or(&dir))
                 .spawn()
                 .map_err(|e| format!("Unable to start the game: {e}"))?;
+            hide_while(&dir, hide_launcher, Duration::from_secs(20));
             Ok(())
         })();
         match result {
@@ -182,7 +197,7 @@ mod platform {
         PROCESS_TERMINATE, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, WM_CLOSE,
+        EnumWindows, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SW_HIDE, ShowWindow, WM_CLOSE,
     };
     use windows::core::{BOOL, PWSTR};
 
@@ -296,6 +311,37 @@ mod platform {
             .map(|_| ())
     }
 
+    unsafe extern "system" fn hide_window(window: HWND, data: LPARAM) -> BOOL {
+        unsafe {
+            let targets = &*(data.0 as *const Vec<u32>);
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(window, Some(&mut pid));
+            if targets.contains(&pid) && IsWindowVisible(window).as_bool() {
+                let _ = ShowWindow(window, SW_HIDE);
+            }
+        }
+        BOOL(1)
+    }
+
+    /// Hides the windows HoYoPlay has on the screen; the program goes on in its tray.
+    pub fn hide_launcher_windows(dir: &Path) {
+        let pids: Vec<u32> = processes()
+            .into_iter()
+            .filter(|(pid, name)| {
+                let lower = name.to_lowercase();
+                (lower == "launcher.exe" || lower == "hyp.exe")
+                    && image_path(*pid).is_some_and(|path| super::is_under(&path, dir))
+            })
+            .map(|(pid, _)| pid)
+            .collect();
+        if pids.is_empty() {
+            return;
+        }
+        unsafe {
+            let _ = EnumWindows(Some(hide_window), LPARAM(&pids as *const Vec<u32> as isize));
+        }
+    }
+
     /// Whether HoYoPlay has a window on the screen.
     pub fn launcher_has_window(dir: &Path) -> bool {
         let pids: Vec<u32> = processes()
@@ -335,6 +381,7 @@ mod platform {
     pub fn launcher_has_window(_dir: &Path) -> bool {
         false
     }
+    pub fn hide_launcher_windows(_dir: &Path) {}
 }
 
 #[cfg(test)]

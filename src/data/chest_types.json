@@ -1,0 +1,1595 @@
+{
+  "70210001": {
+    "en": "",
+    "json": "SceneObj_Chest_NormalChest",
+    "kind": "NormalChest",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210002": {
+    "en": "",
+    "json": "SceneObj_Chest_NormalChest",
+    "kind": "NormalChest",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210003": {
+    "en": "",
+    "json": "SceneObj_Chest_NormalChest",
+    "kind": "NormalChest",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210004": {
+    "en": "",
+    "json": "SceneObj_Chest_NormalChest",
+    "kind": "NormalChest",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210005": {
+    "en": "",
+    "json": "SceneObj_Chest_NormalChest",
+    "kind": "NormalChest",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210006": {
+    "en": "",
+    "json": "SceneObj_Chest_NormalChest",
+    "kind": "NormalChest",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210011": {
+    "en": "",
+    "json": "SceneObj_Chest_Default_Lv1",
+    "kind": "Default",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210012": {
+    "en": "",
+    "json": "SceneObj_Chest_Locked_Lv1",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210013": {
+    "en": "",
+    "json": "SceneObj_Chest_Bramble_Lv1",
+    "kind": "Bramble",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210014": {
+    "en": "",
+    "json": "SceneObj_Chest_Frozen_Lv1",
+    "kind": "Frozen",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210021": {
+    "en": "",
+    "json": "SceneObj_Chest_Default_Lv2",
+    "kind": "Default",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210022": {
+    "en": "",
+    "json": "SceneObj_Chest_Locked_Lv2",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210023": {
+    "en": "",
+    "json": "SceneObj_Chest_Bramble_Lv2",
+    "kind": "Bramble",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210024": {
+    "en": "",
+    "json": "SceneObj_Chest_Frozen_Lv2",
+    "kind": "Frozen",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210031": {
+    "en": "",
+    "json": "SceneObj_Chest_Default_Lv3",
+    "kind": "Default",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210032": {
+    "en": "",
+    "json": "SceneObj_Chest_Locked_Lv3",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210033": {
+    "en": "",
+    "json": "SceneObj_Chest_Bramble_Lv3",
+    "kind": "Bramble",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210034": {
+    "en": "",
+    "json": "SceneObj_Chest_Frozen_Lv3",
+    "kind": "Frozen",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210041": {
+    "en": "",
+    "json": "SceneObj_Chest_Default_Lv4",
+    "kind": "Default",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210042": {
+    "en": "",
+    "json": "SceneObj_Chest_Locked_Lv4",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210043": {
+    "en": "",
+    "json": "SceneObj_Chest_Bramble_Lv4",
+    "kind": "Bramble",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210044": {
+    "en": "",
+    "json": "SceneObj_Chest_Frozen_Lv4",
+    "kind": "Frozen",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210051": {
+    "en": "",
+    "json": "SceneObj_Chest_Default_Lv5",
+    "kind": "Default",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210052": {
+    "en": "",
+    "json": "SceneObj_Chest_Locked_Lv5",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210053": {
+    "en": "",
+    "json": "SceneObj_Chest_Bramble_Lv5",
+    "kind": "Bramble",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210054": {
+    "en": "",
+    "json": "SceneObj_Chest_Frozen_Lv5",
+    "kind": "Frozen",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70210063": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Rock_Lv1",
+    "kind": "Rock",
+    "locked": false,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "70210106": {
+    "en": "Touch the Trounce Blossom",
+    "json": "SceneObj_Chest_Flora",
+    "kind": "Flora",
+    "locked": false,
+    "ru": "Прикоснуться к Цветку наказания",
+    "tier": 0,
+    "water": false
+  },
+  "70210109": {
+    "en": "Touch the Ley Line Blossom",
+    "json": "SceneObj_Chest_Flora",
+    "kind": "Flora",
+    "locked": false,
+    "ru": "Прикоснуться к Цветку артерий земли",
+    "tier": 0,
+    "water": false
+  },
+  "70210110": {
+    "en": "Touch the Ley Line Blossom",
+    "json": "SceneObj_Chest_Flora",
+    "kind": "Flora",
+    "locked": false,
+    "ru": "Прикоснуться к Цветку артерий земли",
+    "tier": 0,
+    "water": false
+  },
+  "70210111": {
+    "en": "Touch the Dragon Clot",
+    "json": "SceneObj_Chest_Flora",
+    "kind": "Flora",
+    "locked": false,
+    "ru": "Прикоснуться к сгустку дракона",
+    "tier": 0,
+    "water": false
+  },
+  "70210113": {
+    "en": "Open",
+    "json": "SceneObj_Chest_Hero",
+    "kind": "Hero",
+    "locked": false,
+    "ru": "Активировать",
+    "tier": 0,
+    "water": false
+  },
+  "70210115": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Default_Lv4",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "70210116": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Chest_Locked_Lv5",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": false
+  },
+  "70210118": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Default_Lv1",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "70210119": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Default_Lv1",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "70210120": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Locked_Lv1",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "70210121": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Default_Lv2",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "70210122": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Locked_Lv2",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "70210123": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Default_Lv4",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "70210124": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Locked_Lv4",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "70210125": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Chest_Default_Lv5",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": false
+  },
+  "70210126": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Chest_Locked_Lv5",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": false
+  },
+  "70210127": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Default_Lv1_UnderWater",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": true
+  },
+  "70210128": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Locked_Lv1_UnderWater",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": true
+  },
+  "70210129": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Default_Lv2_UnderWater",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": true
+  },
+  "70210130": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Locked_Lv2_UnderWater",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": true
+  },
+  "70210131": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Default_Lv4_UnderWater",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": true
+  },
+  "70210132": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Locked_Lv4_UnderWater",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": true
+  },
+  "70210133": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Chest_Default_Lv5_UnderWater",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": true
+  },
+  "70210134": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Chest_Locked_Lv5_UnderWater",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": true
+  },
+  "70210136": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Locked_Lv2_RemusLanternFish",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "70211001": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Default_Lv1",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "70211002": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Locked_Lv1",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "70211011": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Default_Lv2",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "70211012": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Locked_Lv2",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "70211021": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Default_Lv4",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "70211022": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Locked_Lv4",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "70211031": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Chest_Default_Lv5",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": false
+  },
+  "70211032": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Chest_Locked_Lv5",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": false
+  },
+  "70211101": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Default_Lv1",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "70211102": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Locked_Lv1",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "70211103": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Bramble_Lv1",
+    "kind": "Bramble",
+    "locked": false,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "70211104": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Frozen_Lv1",
+    "kind": "Frozen",
+    "locked": false,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "70211111": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Default_Lv2",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "70211112": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Locked_Lv2",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "70211121": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Default_Lv4",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "70211122": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Locked_Lv4",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "70211123": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Default_Lv4",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "70211131": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Chest_Default_Lv5",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": false
+  },
+  "70211132": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Chest_Locked_Lv5",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": false
+  },
+  "70211141": {
+    "en": "Common Chest",
+    "json": "SceneObj_EssenceChest_Default_Lv1",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "70211142": {
+    "en": "Common Chest",
+    "json": "SceneObj_EssenceChest_Locked_Lv1",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "70211143": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_EssenceChest_Default_Lv2",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "70211144": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_EssenceChest_Locked_Lv2",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "70211145": {
+    "en": "Precious Chest",
+    "json": "SceneObj_EssenceChest_Default_Lv4",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "70211146": {
+    "en": "Precious Chest",
+    "json": "SceneObj_EssenceChest_Locked_Lv4",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "70211147": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_EssenceChest_Default_Lv5",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": false
+  },
+  "70211148": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_EssenceChest_Locked_Lv5",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": false
+  },
+  "70211150": {
+    "en": "Remarkable Chest",
+    "json": "SceneObj_Chest_Default_Lv4",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Удивительный сундук",
+    "tier": 5,
+    "water": false
+  },
+  "70211151": {
+    "en": "Remarkable Chest",
+    "json": "SceneObj_Chest_Locked_Lv4",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Удивительный сундук",
+    "tier": 5,
+    "water": false
+  },
+  "70211156": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Locked_Lv1",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "70211157": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Locked_Lv2",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "70211158": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Locked_Lv4",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "70211159": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Chest_Locked_Lv5",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": false
+  },
+  "70211160": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Default_Lv1",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "70211161": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Default_Lv2",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "70211162": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Default_Lv4",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "70211163": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Chest_Default_Lv5",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": false
+  },
+  "70211166": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_DefaultFollowMove_Lv1",
+    "kind": "DefaultFollowMove",
+    "locked": false,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "70211167": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_DefaultFollowMove_Lv2",
+    "kind": "DefaultFollowMove",
+    "locked": false,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "70211173": {
+    "en": "Common Chest",
+    "json": "SceneObj_Ticket_Chest_Locked_Lv1",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "70211174": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Ticket_Chest_Locked_Lv2",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "70211175": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Ticket_Chest_Locked_Lv4",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "70211176": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Ticket_Chest_Locked_Lv5",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": false
+  },
+  "70211177": {
+    "en": "Common Chest",
+    "json": "SceneObj_Ticket_Chest_Locked_Lv1",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "70211178": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Ticket_Chest_Locked_Lv2",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "70211179": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Ticket_Chest_Locked_Lv4",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "70211180": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Ticket_Chest_Locked_Lv5",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": false
+  },
+  "70211181": {
+    "en": "Common Chest",
+    "json": "SceneObj_Ticket_Chest_Locked_Lv1",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "70211182": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Ticket_Chest_Locked_Lv2",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "70211183": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Ticket_Chest_Locked_Lv4",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "70211184": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Ticket_Chest_Locked_Lv5",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": false
+  },
+  "70211185": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Default_Lv1_Amphibious",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": true
+  },
+  "70211186": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Locked_Lv1_Amphibious",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": true
+  },
+  "70211187": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Default_Lv2_Amphibious",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": true
+  },
+  "70211188": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Locked_Lv2_Amphibious",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": true
+  },
+  "70211189": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Default_Lv4_Amphibious",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": true
+  },
+  "70211190": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Locked_Lv4_Amphibious",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": true
+  },
+  "70211191": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Chest_Default_Lv5_Amphibious",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": true
+  },
+  "70211192": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Chest_Locked_Lv5_Amphibious",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": true
+  },
+  "70211193": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Default_Lv1_UnderWater",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": true
+  },
+  "70211194": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Locked_Lv1_UnderWater",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": true
+  },
+  "70211195": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Default_Lv2_UnderWater",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": true
+  },
+  "70211196": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Locked_Lv2_UnderWater",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": true
+  },
+  "70211197": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Default_Lv4_UnderWater",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": true
+  },
+  "70211198": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Locked_Lv4_UnderWater",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": true
+  },
+  "70211199": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Chest_Default_Lv5_UnderWater",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": true
+  },
+  "70211200": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Chest_Locked_Lv5_UnderWater",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": true
+  },
+  "70211201": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Default_Lv1_AboveWater",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": true
+  },
+  "70211202": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Locked_Lv1_AboveWater",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": true
+  },
+  "70217001": {
+    "en": "Skyrider Greatsword",
+    "json": "SceneObj_Chest_Calibur_Mitsurugi",
+    "kind": "Calibur",
+    "locked": false,
+    "ru": "Большой меч небесного всадника",
+    "tier": 0,
+    "water": false
+  },
+  "70217002": {
+    "en": "Black Tassel",
+    "json": "SceneObj_Chest_Carlibur_Noire",
+    "kind": "Carlibur",
+    "locked": false,
+    "ru": "Чёрная кисть",
+    "tier": 0,
+    "water": false
+  },
+  "70217004": {
+    "en": "Traveler's Handy Sword",
+    "json": "SceneObj_Chest_Carlibur_Noire",
+    "kind": "Carlibur",
+    "locked": false,
+    "ru": "Меч путешественника",
+    "tier": 0,
+    "water": false
+  },
+  "70217005": {
+    "en": "Royal Flora",
+    "json": "SceneObj_Chest_Relic",
+    "kind": "Relic",
+    "locked": false,
+    "ru": "Королевский цветок",
+    "tier": 0,
+    "water": false
+  },
+  "70217006": {
+    "en": "Hidden Treasure",
+    "json": "SceneObj_Chest_TreasureMap",
+    "kind": "TreasureMap",
+    "locked": false,
+    "ru": "Сундук карты сокровищ",
+    "tier": 0,
+    "water": false
+  },
+  "70217008": {
+    "en": "Open",
+    "json": "SceneObj_Chest_Hero_03",
+    "kind": "Hero",
+    "locked": false,
+    "ru": "Активировать",
+    "tier": 0,
+    "water": false
+  },
+  "70217015": {
+    "en": "Pledging Vessel",
+    "json": "SceneObj_Chest_Relic02",
+    "kind": "Relic02",
+    "locked": false,
+    "ru": "Золотой кубок клятвы",
+    "tier": 0,
+    "water": false
+  },
+  "70217016": {
+    "en": "Ceremonial War-Plume",
+    "json": "SceneObj_Chest_Relic02",
+    "kind": "Relic02",
+    "locked": false,
+    "ru": "Боевое перо командира",
+    "tier": 0,
+    "water": false
+  },
+  "70217017": {
+    "en": "General's Ancient Helm",
+    "json": "SceneObj_Chest_Relic02",
+    "kind": "Relic02",
+    "locked": false,
+    "ru": "Древний шлем генерала",
+    "tier": 0,
+    "water": false
+  },
+  "70217018": {
+    "en": "Flower of Accolades",
+    "json": "SceneObj_Chest_Relic02",
+    "kind": "Relic02",
+    "locked": false,
+    "ru": "Цветок почестей",
+    "tier": 0,
+    "water": false
+  },
+  "70217019": {
+    "en": "Orichalceous Time-Dial",
+    "json": "SceneObj_Chest_Relic02",
+    "kind": "Relic02",
+    "locked": false,
+    "ru": "Золотые часы",
+    "tier": 0,
+    "water": false
+  },
+  "70217028": {
+    "en": "Golden Bird's Shedding",
+    "json": "SceneObj_Chest_Relic",
+    "kind": "Relic",
+    "locked": false,
+    "ru": "Перо золотой птицы",
+    "tier": 0,
+    "water": false
+  },
+  "70217029": {
+    "en": "Nymph's Constancy",
+    "json": "SceneObj_Chest_Relic02",
+    "kind": "Relic02",
+    "locked": false,
+    "ru": "Постоянство нимфы",
+    "tier": 0,
+    "water": false
+  },
+  "70217030": {
+    "en": "Wandering Scholar's Claw Cup",
+    "json": "SceneObj_Chest_Relic",
+    "kind": "Relic",
+    "locked": false,
+    "ru": "Кубок бродячего исследователя",
+    "tier": 0,
+    "water": false
+  },
+  "70217031": {
+    "en": "Mountain Ranger's Marker",
+    "json": "SceneObj_Chest_Relic",
+    "kind": "Relic",
+    "locked": false,
+    "ru": "Маячок горного патрульного",
+    "tier": 0,
+    "water": false
+  },
+  "70217032": {
+    "en": "Demon-Warrior's Feather Mask",
+    "json": "SceneObj_Chest_Relic",
+    "kind": "Relic",
+    "locked": false,
+    "ru": "Перьевая маска воина-демона",
+    "tier": 0,
+    "water": false
+  },
+  "70217033": {
+    "en": "Beast Tamer's Talisman",
+    "json": "SceneObj_Chest_Relic",
+    "kind": "Relic",
+    "locked": false,
+    "ru": "Талисман укротителя зверей",
+    "tier": 0,
+    "water": false
+  },
+  "70217034": {
+    "en": "Mystic's Gold Dial",
+    "json": "SceneObj_Chest_Relic",
+    "kind": "Relic",
+    "locked": false,
+    "ru": "Золотые часы мистика",
+    "tier": 0,
+    "water": false
+  },
+  "70217035": {
+    "en": "Pre-Banquet of the Contenders",
+    "json": "SceneObj_Chest_Relic",
+    "kind": "Relic",
+    "locked": false,
+    "ru": "Банкет перед состязанием",
+    "tier": 0,
+    "water": false
+  },
+  "70217036": {
+    "en": "Root of the Spirit-Marrow",
+    "json": "SceneObj_Chest_Relic",
+    "kind": "Relic",
+    "locked": false,
+    "ru": "Корень костного мозга души",
+    "tier": 0,
+    "water": false
+  },
+  "70217037": {
+    "en": "Crown of the Saints",
+    "json": "SceneObj_Chest_Relic",
+    "kind": "Relic",
+    "locked": false,
+    "ru": "Корона святых",
+    "tier": 0,
+    "water": false
+  },
+  "70217038": {
+    "en": "Reckoning of the Xenogenic",
+    "json": "SceneObj_Chest_Relic",
+    "kind": "Relic",
+    "locked": false,
+    "ru": "Ожидания инородцев",
+    "tier": 0,
+    "water": false
+  },
+  "70217039": {
+    "en": "Myths of the Night Realm",
+    "json": "SceneObj_Chest_Relic",
+    "kind": "Relic",
+    "locked": false,
+    "ru": "Мифы владений ночи",
+    "tier": 0,
+    "water": false
+  },
+  "70217040": {
+    "en": "Mountain Ranger's Marker",
+    "json": "SceneObj_Chest_Relic02",
+    "kind": "Relic02",
+    "locked": false,
+    "ru": "Маячок горного патрульного",
+    "tier": 0,
+    "water": false
+  },
+  "70217044": {
+    "en": "",
+    "json": "SceneObj_Chest_Relic02",
+    "kind": "Relic02",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70217045": {
+    "en": "",
+    "json": "SceneObj_Chest_Relic",
+    "kind": "Relic",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70292108": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Locked_Lv2_FollowMove",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "70292111": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Locked_Lv1_FollowMove",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "70292112": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Locked_Lv4_FollowMove",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "70360047": {
+    "en": "",
+    "json": "SceneObj_Chest_Hero_Treasure",
+    "kind": "Hero",
+    "locked": false,
+    "ru": "",
+    "tier": 0,
+    "water": false
+  },
+  "70801125": {
+    "en": "Sanctifying Elixir",
+    "json": "SceneObj_Chest_Relic03",
+    "kind": "Relic03",
+    "locked": false,
+    "ru": "Освящённый эликсир",
+    "tier": 0,
+    "water": false
+  },
+  "73037129": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Locked_Lv2_FollowMove",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "73037130": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Locked_Lv4_FollowMove",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "73045218": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Chest_Locked_Lv5_FollowMove",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": false
+  },
+  "73065008": {
+    "en": "Dust of Enlightenment",
+    "json": "SceneObj_Chest_Relic03",
+    "kind": "Relic03",
+    "locked": false,
+    "ru": "Пыль просветления",
+    "tier": 0,
+    "water": false
+  },
+  "73174098": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Default_Lv1_V70",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "73174099": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Locked_Lv1_V70",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "73174100": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Default_Lv2_V70",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "73174101": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Locked_Lv2_V70",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "73174102": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Default_Lv3_V70",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "73174103": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Locked_Lv3_V70",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "73174104": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Chest_Default_Lv4_V70",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": false
+  },
+  "73174105": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Chest_Locked_Lv4_V70",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": false
+  },
+  "73174106": {
+    "en": "Remarkable Chest",
+    "json": "SceneObj_Chest_Default_Lv4_V70",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Удивительный сундук",
+    "tier": 5,
+    "water": false
+  },
+  "73174107": {
+    "en": "Remarkable Chest",
+    "json": "SceneObj_Chest_Locked_Lv4_V70",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Удивительный сундук",
+    "tier": 5,
+    "water": false
+  },
+  "73174125": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Default_Lv1_V70",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "73174126": {
+    "en": "Common Chest",
+    "json": "SceneObj_Chest_Locked_Lv1_V70",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Обычный сундук",
+    "tier": 1,
+    "water": false
+  },
+  "73174127": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Default_Lv2_V70",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "73174128": {
+    "en": "Exquisite Chest",
+    "json": "SceneObj_Chest_Locked_Lv2_V70",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Богатый сундук",
+    "tier": 2,
+    "water": false
+  },
+  "73174129": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Default_Lv3_V70",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "73174130": {
+    "en": "Precious Chest",
+    "json": "SceneObj_Chest_Locked_Lv3_V70",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Драгоценный сундук",
+    "tier": 3,
+    "water": false
+  },
+  "73174131": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Chest_Default_Lv4_V70",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": false
+  },
+  "73174132": {
+    "en": "Luxurious Chest",
+    "json": "SceneObj_Chest_Locked_Lv4_V70",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Роскошный сундук",
+    "tier": 4,
+    "water": false
+  },
+  "73174133": {
+    "en": "Remarkable Chest",
+    "json": "SceneObj_Chest_Default_Lv4_V70",
+    "kind": "Default",
+    "locked": false,
+    "ru": "Удивительный сундук",
+    "tier": 5,
+    "water": false
+  },
+  "73174134": {
+    "en": "Remarkable Chest",
+    "json": "SceneObj_Chest_Locked_Lv4_V70",
+    "kind": "Locked",
+    "locked": true,
+    "ru": "Удивительный сундук",
+    "tier": 5,
+    "water": false
+  },
+  "73190024": {
+    "en": "Dust of Enlightenment",
+    "json": "SceneObj_Chest_Relic03",
+    "kind": "Relic03",
+    "locked": false,
+    "ru": "Пыль просветления",
+    "tier": 0,
+    "water": false
+  }
+}

@@ -97,6 +97,36 @@ fn preview_steps() -> Vec<(f32, Vec<Change>)> {
                 },
             ],
         ),
+        // Chests in view, then one opened.
+        (
+            6.2,
+            vec![
+                Change {
+                    kind: ChangeKind::ChestSeen(1),
+                    delta: 2,
+                },
+                Change {
+                    kind: ChangeKind::ChestSeen(2),
+                    delta: 1,
+                },
+            ],
+        ),
+        (
+            7.8,
+            vec![
+                Change {
+                    kind: ChangeKind::ChestOpened(70_211_002),
+                    delta: 1,
+                },
+                Change {
+                    kind: ChangeKind::ChestTotals {
+                        opened: 4,
+                        known: 41,
+                    },
+                    delta: 41,
+                },
+            ],
+        ),
     ]
 }
 
@@ -358,10 +388,34 @@ impl DrawLine {
                 None => (String::new(), format!("#{id}")),
             },
             ChangeKind::Note(text) => (String::new(), text.clone()),
+            ChangeKind::ChestSeen(tier) => (
+                String::new(),
+                format!(
+                    "{}: {}",
+                    if russian { "Рядом" } else { "Nearby" },
+                    crate::chests::tier_name(*tier, russian)
+                ),
+            ),
+            ChangeKind::ChestOpened(gadget) => (
+                String::new(),
+                format!(
+                    "{} {}",
+                    crate::chests::kind_name(*gadget, russian),
+                    if russian { "открыт" } else { "opened" }
+                ),
+            ),
+            ChangeKind::ChestTotals { .. } => (
+                String::new(),
+                if russian { "Сундуков открыто" } else { "Chests opened" }.to_owned(),
+            ),
         };
         let note = matches!(kind, ChangeKind::Note(_));
         let amount = if note {
             String::new()
+        } else if let ChangeKind::ChestSeen(_) = kind {
+            format!("×{delta}")
+        } else if let ChangeKind::ChestTotals { opened, known } = kind {
+            format!("{opened}/{known}")
         } else if matches!(kind, ChangeKind::Refinement(_)) {
             format!("R{delta}")
         } else if matches!(
@@ -378,12 +432,15 @@ impl DrawLine {
             icon,
             name,
             amount,
-            color: if matches!(
+            color: if matches!(kind, ChangeKind::ChestSeen(_)) {
+                Color32::from_rgb(0x6a, 0xb7, 0xff)
+            } else if matches!(
                 kind,
                 ChangeKind::Level(_)
                     | ChangeKind::Talent(..)
                     | ChangeKind::Weapon(_)
                     | ChangeKind::Refinement(_)
+                    | ChangeKind::ChestTotals { .. }
             ) {
                 Color32::from_rgb(0xff, 0xc3, 0x4a)
             } else if delta < 0 {

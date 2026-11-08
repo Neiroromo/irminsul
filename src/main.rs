@@ -19,17 +19,38 @@ mod achievement_data;
 mod achievement_tab;
 mod admin;
 mod app;
+mod atlas;
+mod atlas_fetch;
 mod autostart;
 mod capture;
 mod capture_popup;
 mod changes;
 mod changes_popup;
+mod chest_watch;
+mod object_watch;
+mod quest_watch;
+mod puzzle_watch;
+mod chests;
+mod chests_tab;
+mod coverage;
 mod debug_timeline;
 mod good;
 mod game_launch;
+mod hotkey;
+mod levels;
+mod scenes;
 mod icons;
 mod live_data;
+mod map_overlay;
+mod minimap;
+mod marker_icons;
+mod markers;
+mod map_render;
+mod map_tab;
+mod map_tiles;
+mod official_chests;
 mod overlay;
+mod overlay_window;
 mod planner_tab;
 mod probe;
 mod monitor;
@@ -115,6 +136,29 @@ pub struct ActiveProfile {
     pub nickname: Option<String>,
 }
 
+/// Where the player is in the world, as the game last said (every few seconds).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlayerPlace {
+    pub scene: u32,
+    /// The game's coordinates: x, height, z.
+    pub position: [f32; 3],
+    /// The floor of the map the player is on, as far as it can be told (0 is
+    /// the surface; see `levels`).
+    pub floor: u32,
+    /// The map of the official map the player is on (0 if the scene is not
+    /// known to be one), and where on it, from the origin of the map.
+    pub map: u32,
+    pub at: [f32; 2],
+    /// Pixels of the map to a metre of the scene (1 for most maps).
+    pub scale: f32,
+    /// The way the player faces, in degrees of the game (0 along z, 90 along x).
+    pub yaw: Option<f32>,
+    /// How far around them (metres) what is followed is looked at.
+    pub range: f32,
+    /// Counts what the game said, so a new one can be told from the one before.
+    pub count: u64,
+}
+
 /// How far capturing the data of the current connection to the game has come.
 #[derive(Clone, Debug, Default)]
 pub struct CaptureProgress {
@@ -145,6 +189,12 @@ pub struct AppState {
     profiles_version: u64,
     /// What the account in use has, to show.
     roster: std::sync::Arc<player_data::Roster>,
+    /// The chests of that account that have been seen, and which are opened.
+    chests: std::sync::Arc<chests::Snapshot>,
+    /// What state the chests of the markers of the other maps are in, in the game.
+    chest_marks: std::sync::Arc<chest_watch::ChestMarks>,
+    /// Where the player is, if the game has said.
+    player: Option<PlayerPlace>,
     updated: DataUpdated,
 }
 
@@ -160,6 +210,9 @@ impl AppState {
             profile: None,
             profiles_version: 0,
             roster: Default::default(),
+            chests: Default::default(),
+            chest_marks: Default::default(),
+            player: None,
             updated: DataUpdated::new(),
         }
     }
@@ -235,8 +288,36 @@ impl ReloadHandle {
     }
 }
 
+/// A panic is written to `crash.log` in the log folder, with where it was.  The
+/// window has no console, so otherwise a panic would end the program with
+/// nothing said.
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let text = format!(
+            "{} {info}\n{}\n\n",
+            chrono::Local::now().to_rfc3339(),
+            std::backtrace::Backtrace::force_capture()
+        );
+        if let Ok(dir) = log_dir() {
+            use std::io::Write;
+            let _ = std::fs::create_dir_all(&dir);
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("crash.log"))
+            {
+                let _ = file.write_all(text.as_bytes());
+            }
+        }
+        tracing::error!("panic: {info}");
+        previous(info);
+    }));
+}
+
 fn main() -> eframe::Result {
     let (_guard, reload_handle) = tracing_init().unwrap();
+    install_panic_hook();
 
     let args = Args::parse();
 
@@ -255,6 +336,9 @@ fn main() -> eframe::Result {
         .with_min_inner_size([760., 480.])
         .with_resizable(true)
         .with_decorations(false)
+        // The map over the game is a window whose pictures are see-through at
+        // places, which needs the windows to be made so that they can be.
+        .with_transparent(true)
         .with_icon(
             // NOTE: Adding an icon is optional
             eframe::icon_data::from_png_bytes(&include_bytes!("../assets/icon-256.png")[..])
@@ -322,4 +406,13 @@ fn tracing_init() -> Result<(tracing_appender::non_blocking::WorkerGuard, Reload
     tracing::info!("Tracing initialized and logging to file.");
 
     Ok((guard, ReloadHandle(reload_handle)))
+}
+
+impl PlayerPlace {
+    /// The way the player faces on the map (a unit step to the right and down), if
+    /// told: the map has x against the game's z, and y against its x.
+    pub fn facing(&self) -> Option<[f32; 2]> {
+        let turn = self.yaw?.to_radians();
+        Some([-turn.cos(), -turn.sin()])
+    }
 }

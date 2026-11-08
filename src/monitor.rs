@@ -8,8 +8,9 @@ use anime_game_data::AnimeGameData;
 use anyhow::{Context, Result, anyhow};
 use auto_artifactarium::{
     ConnectionPacket, GameCommand, GamePacket, GameSniffer, SnifferEvent, matches_achievement_packet, matches_avatar_packet,
-    matches_avatar_props, matches_avatar_stats, matches_item_changes, matches_item_packet, matches_talent_level,
-    matches_player_mora, matches_player_props,
+    matches_avatar_props, matches_avatar_stats, matches_scene_arrival, matches_teleport_target, matches_gadget_use, matches_gadgets_in_view, matches_item_changes,
+    matches_avatar_motion, matches_quest_list, StoryStatus, matches_quest_updates, matches_story_update, matches_item_packet, matches_location_of_player, matches_talent_level, matches_player_mora,
+    matches_player_props, matches_uid_of_player,
 };
 use base64::prelude::*;
 use chrono::prelude::*;
@@ -83,6 +84,21 @@ impl AppStateManager {
         let _ = self.state_tx.send(self.app_state.clone());
     }
 
+    pub fn update_chest_marks(&mut self, marks: std::sync::Arc<crate::chest_watch::ChestMarks>) {
+        self.app_state.chest_marks = marks;
+        let _ = self.state_tx.send(self.app_state.clone());
+    }
+
+    pub fn update_chests(&mut self, chests: std::sync::Arc<crate::chests::Snapshot>) {
+        self.app_state.chests = chests;
+        let _ = self.state_tx.send(self.app_state.clone());
+    }
+
+    pub fn update_player(&mut self, player: crate::PlayerPlace) {
+        self.app_state.player = Some(player);
+        let _ = self.state_tx.send(self.app_state.clone());
+    }
+
     pub fn update_debug_events(&mut self, events: Vec<String>) {
         self.app_state.debug_events = events;
         let _ = self.state_tx.send(self.app_state.clone());
@@ -129,6 +145,15 @@ pub struct Monitor {
     session_started: Option<Instant>,
     /// The account of the latest connection to the game, once it is known.
     session_uid: Option<u32>,
+    /// The id the game puts on the player's place, when it is not the account's
+    /// (`location_uid`), and one that is told instead of it, and how many times.
+    location_uid: Option<u32>,
+    foreign_location: Option<(u32, u8)>,
+    /// What was said of the player's place in this connection, once each.
+    location_said: bool,
+    location_dumped: bool,
+    /// A place with the account's own id was told in this connection.
+    location_matched: bool,
     session_nickname: Option<String>,
     /// What was captured in the latest connection.
     captured: Captured,
@@ -140,6 +165,15 @@ pub struct Monitor {
     active_nickname: Option<String>,
     timeline: DebugTimeline,
     sniffer: GameSniffer,
+    /// A session key was found and is not kept yet.
+    session_key_changed: bool,
+    /// Where the player was last told by the game to be (scene, floor, how far the radar
+    /// looks), which the movement the client sends is put on, and when it was last used.
+    motion_scene: Option<(u32, u32, f32)>,
+    motion_at: Instant,
+    /// How many commands of each kind came, and since when (told in the timeline).
+    command_counts: std::collections::BTreeMap<u16, u32>,
+    counts_since: std::time::Instant,
     capture_cancel_token: Option<CancellationToken>,
     packet_tx: mpsc::UnboundedSender<Vec<u8>>,
     packet_rx: mpsc::UnboundedReceiver<Vec<u8>>,
@@ -149,6 +183,27 @@ pub struct Monitor {
     /// Whether the mora has been seen in the latest connection: the first time
     /// is what there was at login, not a change.
     mora_seen_in_session: bool,
+    /// The chests that were seen and opened, of the account in use.
+    chests: crate::chests::Tracker,
+    /// Which floor of the map the player is on.
+    floors: crate::levels::FloorLocator,
+    /// Which map each scene of the game is.
+    scenes: crate::scenes::Scenes,
+    /// The state of the chests of the markers of the other maps, told by the game.
+    watch: crate::chest_watch::ChestWatch,
+    watch_published: u64,
+    /// The state of the things done once (oculi, seelies, puzzles), told by the game.
+    objects: crate::object_watch::ObjectWatch,
+    /// The quests that are done, told by the game, for the markers of the quests.
+    quests: crate::quest_watch::QuestWatch,
+    /// Puzzles done and things picked up, for the markers of them.
+    puzzles: crate::puzzle_watch::PuzzleWatch,
+    /// The things put in view that are written in the census, with their state.
+    census_seen: std::collections::HashMap<(u32, u32), Option<u32>>,
+    /// The version of the chests that the UI has.
+    chests_published: u64,
+    /// How many times the game has said where the player is.
+    player_reports: u64,
 }
 
 impl Monitor {
@@ -162,7 +217,12 @@ impl Monitor {
         let game_data = get_database(&mut app_state, &mut ui_message_rx).await?;
         let player_data = PlayerData::new(game_data);
         let keys = load_keys()?;
-        let sniffer = GameSniffer::new().set_initial_keys(keys.clone());
+        let session_key_changed = false;
+        let motion_scene = None;
+        let motion_at = Instant::now();
+        let command_counts = Default::default();
+        let counts_since = std::time::Instant::now();
+        let sniffer = GameSniffer::new().set_initial_keys(keys.clone()).set_retained_key(load_session_key());
         let (packet_tx, packet_rx) = mpsc::unbounded_channel();
         let (status_tx, status_rx) = mpsc::unbounded_channel();
 
@@ -174,6 +234,11 @@ impl Monitor {
             keys,
             session_started: None,
             session_uid: None,
+            location_uid: None,
+            foreign_location: None,
+            location_said: false,
+            location_dumped: false,
+            location_matched: false,
             session_nickname: None,
             captured: Captured::default(),
             unsaved: false,
@@ -182,6 +247,11 @@ impl Monitor {
             active_nickname: None,
             timeline: DebugTimeline::new(),
             sniffer,
+            session_key_changed,
+            motion_scene,
+            motion_at,
+            command_counts,
+            counts_since,
             capture_cancel_token: None,
             packet_tx,
             packet_rx,
@@ -189,6 +259,17 @@ impl Monitor {
             status_rx,
             capture_backend,
             mora_seen_in_session: false,
+            chests: crate::chests::Tracker::new(),
+            floors: crate::levels::FloorLocator::new(),
+            scenes: crate::scenes::Scenes::new(),
+            watch: crate::chest_watch::ChestWatch::new(),
+            watch_published: 0,
+            objects: crate::object_watch::ObjectWatch::new(),
+            quests: crate::quest_watch::QuestWatch::new(),
+            puzzles: crate::puzzle_watch::PuzzleWatch::new(),
+            census_seen: Default::default(),
+            chests_published: u64::MAX,
+            player_reports: 0,
         })
     }
 
@@ -289,9 +370,183 @@ impl Monitor {
             self.save_session();
         }
         self.session_uid = None;
+        self.motion_scene = None;
+        self.location_uid = None;
+        self.foreign_location = None;
+        self.location_said = false;
+        self.location_dumped = false;
+        self.location_matched = false;
         self.session_nickname = None;
         self.captured = Captured::default();
         self.last_data = None;
+        self.chests.start_session();
+        self.watch.start_session();
+        self.objects.start_session();
+        self.puzzles.start_session();
+        self.census_seen.clear();
+    }
+
+    /// The account of this connection became known after data of it was taken:
+    /// that data is of it.
+    fn learned_uid(&mut self, uid: u32) {
+        self.session_uid = Some(uid);
+        self.record(format!("player id {uid} (found next to the name)"));
+        if self.active_uid.is_none() {
+            self.active_uid = Some(uid);
+            self.active_nickname = self.session_nickname.clone();
+            let profile = self.active_profile();
+            self.app_state.update_profile(profile);
+        }
+        self.chests_for_session();
+        self.publish_chests();
+        // What was captured so far can be stored now.
+        self.unsaved = true;
+        self.last_data = Some(Instant::now());
+    }
+
+    /// Tells the UI of the chests, if they changed.
+    fn publish_chests(&mut self) {
+        let snapshot = self.chests.snapshot();
+        if snapshot.version != self.chests_published {
+            self.chests_published = snapshot.version;
+            self.app_state.update_chests(snapshot);
+        }
+    }
+
+    /// Gadgets of the world came into view: the chests among them are noted,
+    /// and the user is told of the ones that were not told of yet.
+    fn chests_in_view(&mut self, gadgets: &[auto_artifactarium::SceneGadget]) {
+        self.chests_for_session();
+        self.take_census(gadgets);
+        self.floors.observe(gadgets);
+        self.scenes.note_gadgets(gadgets);
+        // Chests of other scenes (Enkanomiya and the like) are not of the world: their
+        // places are not kept as places of the world.
+        let world = self.scenes.scene_now().is_none_or(|scene| scene == 3);
+        // The chests of the markers of the other maps.
+        if let Some(scene) = self.scenes.scene_now()
+            && let Some(scene_map) = self.scenes.map_of(scene)
+        {
+            self.watch.gadgets(scene, scene_map, gadgets);
+            self.objects.gadgets(scene, scene_map, gadgets);
+            self.puzzles.gadgets(scene, scene_map, gadgets);
+            self.publish_chest_marks();
+        }
+        let report = self.chests.gadgets_in_scene(gadgets, world);
+        if !report.new_by_tier.is_empty() {
+            let text: Vec<String> = report
+                .new_by_tier
+                .iter()
+                .map(|(tier, count)| format!("tier {tier} x{count}"))
+                .collect();
+            self.record(format!("FOUND chests in view: {}", text.join(", ")));
+            for detail in &report.details {
+                self.record(format!("  chest: {detail}"));
+            }
+            self.app_state.push_changes(
+                report
+                    .new_by_tier
+                    .into_iter()
+                    .map(|(tier, count)| crate::changes::Change {
+                        kind: crate::changes::ChangeKind::ChestSeen(tier),
+                        delta: count as i64,
+                    })
+                    .collect(),
+            );
+        }
+        self.publish_chests();
+    }
+
+    /// Writes down every thing the game puts in view (what kind it is, the state it is
+    /// in, where), once, and again when its state changes: what tells which of the
+    /// things on the map are there or done.
+    fn take_census(&mut self, gadgets: &[auto_artifactarium::SceneGadget]) {
+        let scene = self.scenes.scene_now().unwrap_or(0);
+        let scene_map = self.scenes.map_of(scene);
+        for gadget in gadgets {
+            if self.census_seen.get(&(scene, gadget.entity_id)) == Some(&gadget.state) {
+                continue;
+            }
+            self.census_seen.insert((scene, gadget.entity_id), gadget.state);
+            let place = match (gadget.position, scene_map) {
+                (Some(p), Some(map)) => {
+                    let at = map.to_map(p);
+                    format!("pos={:.1},{:.1},{:.1} map={} at={:.1},{:.1}", p[0], p[1], p[2], map.map, at[0], at[1])
+                }
+                (Some(p), None) => format!("pos={:.1},{:.1},{:.1} map=-", p[0], p[1], p[2]),
+                _ => "pos=-".to_owned(),
+            };
+            crate::probe::census(&format!(
+                "scene={scene} e={} g={} grp={} cfg={} st={:?} {place}",
+                gadget.entity_id, gadget.gadget_id, gadget.group_id, gadget.config_id, gadget.state
+            ));
+        }
+    }
+
+    /// Makes the chests held those of the account of this session.  When the
+    /// account is not known (yet) they are held without one, and go to it when
+    /// it is.
+    /// Gives the maps what the game said of the chests of their markers, if it is new.
+    fn publish_chest_marks(&mut self) {
+        let version = self
+            .watch
+            .version()
+            .wrapping_add(self.objects.version().rotate_left(20))
+            .wrapping_add(self.quests.version().rotate_left(40))
+            .wrapping_add(self.puzzles.version().rotate_left(50));
+        if version != self.watch_published {
+            self.watch_published = version;
+            let mut marks = self.watch.snapshot();
+            let objects = self.objects.snapshot();
+            let quests = self.quests.snapshot();
+            let puzzles = self.puzzles.snapshot();
+            // What a puzzle's own record says is done is not undone by an older sighting of its
+            // objects kept by the watch of the things done once.
+            let done: std::collections::HashSet<u32> = puzzles.opened.iter().map(|(marker, _)| *marker).collect();
+            marks.opened.extend(puzzles.opened);
+            marks.version = version;
+            marks.opened.extend(objects.opened);
+            marks.closed.extend(objects.closed);
+            marks.opened.extend(quests.opened);
+            marks.closed.extend(quests.closed);
+            marks.closed.retain(|marker| !done.contains(marker));
+            self.app_state.update_chest_marks(std::sync::Arc::new(marks));
+        }
+    }
+
+    fn chests_for_session(&mut self) {
+        self.watch.use_account(self.session_uid);
+        self.objects.use_account(self.session_uid);
+        self.quests.use_account(self.session_uid);
+        self.puzzles.use_account(self.session_uid);
+        match self.session_uid {
+            Some(uid) if self.chests.account().is_none() => self.chests.adopt_account(uid),
+            Some(uid) => self.chests.use_account(Some(uid)),
+            None => self.chests.use_account(None),
+        }
+    }
+
+    /// A chest was opened: the user is told, and it is stored.
+    fn chest_opened(&mut self, opened: crate::chests::Opened) {
+        self.record(format!(
+            "FOUND chest opened: gadget {} ({} of {})",
+            opened.gadget, opened.totals.0, opened.totals.1
+        ));
+        self.app_state.push_changes(vec![
+            crate::changes::Change {
+                kind: crate::changes::ChangeKind::ChestOpened(opened.gadget),
+                delta: 1,
+            },
+            crate::changes::Change {
+                kind: crate::changes::ChangeKind::ChestTotals {
+                    opened: opened.totals.0,
+                    known: opened.totals.1,
+                },
+                delta: opened.totals.1.max(1) as i64,
+            },
+        ]);
+        self.chests.save_if_dirty();
+        self.publish_chests();
     }
 
     /// Makes the stored data of `uid` the one the exports use, or none.
@@ -323,6 +578,9 @@ impl Monitor {
         let profile = self.active_profile();
         self.app_state.update_profile(profile);
         self.publish_roster();
+        // The chests shown are those of the same account.
+        self.chests.use_account(uid);
+        self.publish_chests();
     }
 
     fn publish_roster(&mut self) {
@@ -351,6 +609,7 @@ impl Monitor {
         if self.unsaved && settled {
             self.save_session();
         }
+        self.chests.save_if_dirty();
     }
 
     /// Stores what was captured in this connection in the file of the account.
@@ -435,7 +694,8 @@ impl Monitor {
                 SnifferEvent::PlayerUid(uid) => self.session_uid = Some(uid),
                 // Only a fallback: the token response is the better source.
                 SnifferEvent::HeaderUserId(uid) => {
-                    if self.session_uid.is_none() && (100_000_000..=999_999_999).contains(&uid) {
+                    // Ids have nine digits, or ten for the newer Asian accounts.
+                    if self.session_uid.is_none() && (100_000_000..=u32::MAX).contains(&uid) {
                         self.session_uid = Some(uid);
                     }
                 }
@@ -470,7 +730,13 @@ impl Monitor {
                             .to_string(),
                     ));
                 }
+                SnifferEvent::SessionKeyResumed => {
+                    self.app_state.update_capture_error(None);
+                    // What comes now is kept as it comes, as after a login.
+                    crate::probe::session_started();
+                }
                 SnifferEvent::SessionKeyFound { .. } => {
+                    self.session_key_changed = true;
                     self.app_state.update_progress(|progress| progress.key_found = true);
                     self.app_state.update_capture_error(None);
                 }
@@ -487,7 +753,7 @@ impl Monitor {
             "packet decoder panicked, resetting it: {}",
             panic_message(&panic)
         );
-        self.sniffer = GameSniffer::new().set_initial_keys(self.keys.clone());
+        self.sniffer = GameSniffer::new().set_initial_keys(self.keys.clone()).set_retained_key(load_session_key());
         self.record("packet decoder panicked and was reset");
         self.app_state.update_capture_error(Some(
             "Packet decoding failed. Log in to the game again while capture is running."
@@ -502,15 +768,31 @@ impl Monitor {
             Err(panic) => return self.handle_sniffer_panic(panic),
         };
         self.record_sniffer_events();
+        // The key of the connection is kept, so that the program can be started again
+        // (updated) while the game is running without logging in again.
+        if self.session_key_changed {
+            self.session_key_changed = false;
+            if let Some(key) = self.sniffer.session_key() {
+                save_session_key(key);
+            }
+        }
         let commands = match received {
             Some(GamePacket::Commands(commands)) => commands,
             Some(GamePacket::Connection(ConnectionPacket::HandshakeRequested)) => {
                 self.mora_seen_in_session = false;
+                crate::probe::session_started();
                 self.player_data.start_session();
                 return;
             }
             _ => return,
         };
+
+        if self.counts_since.elapsed() >= Duration::from_secs(20) {
+            let text: Vec<String> = self.command_counts.iter().map(|(id, count)| format!("{id}x{count}")).collect();
+            self.command_counts.clear();
+            self.counts_since = std::time::Instant::now();
+            self.record(format!("commands in 20 s: {}", text.join(" ")));
+        }
 
         let log_packets = *self.log_packet_rx.borrow_and_update();
 
@@ -518,8 +800,231 @@ impl Monitor {
         let mut has_new_data = false;
 
         for command in commands {
+            *self.command_counts.entry(command.command_id).or_insert(0) += 1;
             crate::probe::observe(command.command_id, &command.proto_data);
             let _span = tracing::info_span!("packet id {}", command.command_id);
+
+            // The state of the quests: written down (the whole list comes when logging in), so
+            // that what is done can be told from what is not.
+            for update in guarded("quest updates", || Some(matches_quest_updates(&command))).unwrap_or_default() {
+                crate::probe::census(&format!(
+                    "quest id={} state={} story={}",
+                    update.quest, update.state, update.parent
+                ));
+            }
+
+            let list = guarded("quest list", || Some(matches_quest_list(&command))).unwrap_or_default();
+            if !list.is_empty() {
+                self.chests_for_session();
+                self.quests.apply_list(&list);
+                self.publish_chest_marks();
+                let count = |status: StoryStatus| list.iter().filter(|entry| entry.status == status).count();
+                self.record(format!(
+                    "quest list: {} stories, {} done, {} in progress, {} offered",
+                    list.len(),
+                    count(StoryStatus::Done),
+                    count(StoryStatus::InProgress),
+                    count(StoryStatus::Available)
+                ));
+                for entry in &list {
+                    let open: Vec<String> = entry.open_steps.iter().map(|(quest, state)| format!("{quest}:{state}")).collect();
+                    crate::probe::census(&format!(
+                        "queststory id={} status={:?} since={} steps={} open={}",
+                        entry.story,
+                        entry.status,
+                        entry.since,
+                        entry.steps,
+                        open.join(",")
+                    ));
+                }
+            }
+            if let Some((story, quests)) = guarded("story update", || Some(matches_story_update(&command))).flatten() {
+                let list: Vec<String> = quests.iter().map(|(quest, state)| format!("{quest}:{state}")).collect();
+                crate::probe::census(&format!("story id={story} quests={}", list.join(",")));
+                self.chests_for_session();
+                self.quests.apply_story(story, &quests);
+                self.publish_chest_marks();
+            }
+
+            // How the player moves, as the client says it to the server, several times a
+            // second: the map follows that (the game's own report comes every 6 seconds).
+            if command.from_client
+                && self.motion_at.elapsed() >= Duration::from_millis(250)
+                && let Some((scene, floor, range)) = self.motion_scene
+                && let Some(motion) = guarded("avatar motion", || matches_avatar_motion(&command))
+            {
+                self.motion_at = Instant::now();
+                self.chests.note_position(scene, motion.position);
+                self.puzzles.player_at(scene, motion.position);
+                let placed = self.scenes.map_of(scene).map(|scene_map| (scene_map.map, scene_map.to_map(motion.position), scene_map.s));
+                self.player_reports += 1;
+                self.app_state.update_player(crate::PlayerPlace {
+                    scene,
+                    position: motion.position,
+                    floor,
+                    map: placed.map_or(0, |placed| placed.0),
+                    at: placed.map_or([0., 0.], |placed| placed.1),
+                    scale: placed.map_or(1., |placed| placed.2),
+                    yaw: motion.yaw,
+                    range,
+                    count: self.player_reports,
+                });
+            }
+
+            // The account, if the login did not say which it is: the game says it
+            // beside the name of the player.
+            if self.session_uid.is_none()
+                && let Some(name) = self.session_nickname.clone()
+                && let Some(uid) = guarded("uid by name", || matches_uid_of_player(&command, &name))
+            {
+                self.learned_uid(uid);
+            }
+
+            // Where the player is, said every few seconds: the way walked tells
+            // what the game has sent, and the map follows the player.
+            let expected = self.session_uid;
+            let location = guarded("player location", || matches_location_of_player(&command, expected));
+            if location.is_none() && command.command_id == 20584 && !self.location_dumped {
+                // The message that says where the player is came, and could not be
+                // read: its make-up is kept, so that it can be looked at.
+                self.location_dumped = true;
+                let bytes: Vec<String> = command.proto_data.iter().take(160).map(|b| format!("{b:02x}")).collect();
+                self.record(format!(
+                    "player location (command 20584) not read; {} bytes: {}",
+                    command.proto_data.len(),
+                    bytes.join("")
+                ));
+            }
+            if let Some(location) = location {
+                if self.session_uid.is_none() {
+                    // The first place told after the login is the player's own.
+                    self.learned_uid(location.uid);
+                }
+                // The place is of the account's player.  If the game puts another id on
+                // it, and it is always that one, it is the account's all the same: the
+                // place is followed whatever the id is.
+                if self.session_uid == Some(location.uid) {
+                    self.location_matched = true;
+                }
+                if self.session_uid != Some(location.uid) && self.location_uid.is_none() && !self.location_matched {
+                    let count = match self.foreign_location {
+                        Some((uid, count)) if uid == location.uid => count + 1,
+                        _ => 1,
+                    };
+                    self.foreign_location = Some((location.uid, count));
+                    if count >= 3 {
+                        self.location_uid = Some(location.uid);
+                        self.record(format!(
+                            "player place is told with id {}, not the account's {:?}: followed all the same",
+                            location.uid, self.session_uid
+                        ));
+                    }
+                }
+                if !self.location_said {
+                    self.location_said = true;
+                    self.record(format!(
+                        "player place read: scene {}, id {}, account {:?}",
+                        location.scene, location.uid, self.session_uid
+                    ));
+                }
+                if self.session_uid == Some(location.uid) || self.location_uid == Some(location.uid) {
+                    self.chests_for_session();
+                    let changed = self.chests.player_at(location.scene, location.position);
+                    self.player_reports += 1;
+                    let (placed, said) = self.scenes.locate(location.scene, location.position);
+                    if let Some(text) = said {
+                        self.record(text);
+                    }
+                    // The floor of the map the player is on (the surface is 0).
+                    let floor = match (placed, self.scenes.map_of(location.scene)) {
+                        (Some(placed), Some(scene_map)) => {
+                            // The teleports gone to in this scene before are anchors.
+                            let places = self.scenes.teleport_places(location.scene);
+                            self.floors.seed_anchors(scene_map, &places);
+                            let floor = self.floors.locate(placed.map, scene_map, location.position);
+                            // A chest marker walked by with no chest sent is opened.
+                            self.watch.player_at(location.scene, scene_map, location.position, floor);
+                            self.objects.player_at(location.scene, scene_map, location.position, floor);
+                            self.puzzles.report(location.scene, scene_map, location.position, floor);
+                            self.publish_chest_marks();
+                            floor
+                        }
+                        _ => 0,
+                    };
+                    crate::probe::track(&format!(
+                        "scene={} pos={:.1},{:.1},{:.1} yaw={} floor={floor} map={}",
+                        location.scene,
+                        location.position[0],
+                        location.position[1],
+                        location.position[2],
+                        location.yaw.map_or("-".to_owned(), |yaw| format!("{yaw:.0}")),
+                        placed.map_or(0, |placed| placed.map),
+                    ));
+                    self.motion_scene = Some((
+                        location.scene,
+                        floor,
+                        if placed.is_some_and(|placed| placed.map != crate::atlas::WORLD) {
+                            self.watch.range(location.scene)
+                        } else {
+                            crate::chest_watch::radar()
+                        },
+                    ));
+                    self.app_state.update_player(crate::PlayerPlace {
+                        scene: location.scene,
+                        position: location.position,
+                        floor,
+                        map: placed.map_or(0, |placed| placed.map),
+                        at: placed.map_or([0., 0.], |placed| placed.at),
+                        scale: placed.map_or(1., |placed| placed.scale),
+                        yaw: location.yaw,
+                        range: if placed.is_some_and(|placed| placed.map != crate::atlas::WORLD) {
+                            self.watch.range(location.scene)
+                        } else {
+                            crate::chest_watch::radar()
+                        },
+                        count: self.player_reports,
+                    });
+                    if changed {
+                        self.publish_chests();
+                    }
+                }
+            }
+
+            // A teleport: to which point of which scene, and where the player comes in.
+            if let Some((scene, point)) = guarded("teleport target", || matches_teleport_target(&command)) {
+                self.scenes.note_teleport(scene, point);
+            }
+            if let Some((scene, position)) = guarded("scene arrival", || matches_scene_arrival(&command))
+                && let Some(text) = self.scenes.note_arrival(scene, position)
+            {
+                self.record(text);
+                // The movement the client says is of the new place, which is not told yet.
+                self.motion_scene = None;
+                // A teleport: the floor of the waypoint is where the player is.
+                if let Some(scene_map) = self.scenes.map_of(scene) {
+                    self.floors.note_arrival(scene_map, position);
+                    self.objects.entered(scene, position);
+                    self.puzzles.entered(scene, position);
+
+                }
+            }
+
+            // Chests that came into view (closed ones), and chests opened.
+            if let Some(gadgets) = guarded("gadgets in view", || matches_gadgets_in_view(&command)) {
+                self.chests_in_view(&gadgets);
+            }
+            if let Some(event) = guarded("gadget use", || matches_gadget_use(&command)) {
+                self.chests_for_session();
+                if let Some(opened) = self.chests.interaction(&event) {
+                    self.chest_opened(opened);
+                }
+                self.watch.interaction(&event);
+                // A chest opened that is of a group of a puzzle finishes it.
+                if event.kind == 3 && !event.begins {
+                    self.puzzles.chest_opened(event.entity_id);
+                }
+                self.publish_chest_marks();
+            }
             if log_packets {
                 if let Err(e) = log_command(&command) {
                     tracing::info!("error logging command {e}");
@@ -542,6 +1047,10 @@ impl Monitor {
                     self.record(format!("FOUND mora {mora}"));
                     self.unsaved = true;
                     has_new_data = true;
+                    // Rewards are the proof that a chest that began to open did.
+                    if let Some(opened) = self.chests.rewards() {
+                        self.chest_opened(opened);
+                    }
                     // Not the first time in this connection: it was spent or earned.
                     if self.mora_seen_in_session
                         && let Some(before) = before
@@ -558,9 +1067,10 @@ impl Monitor {
             // A stack of materials that changed, as the game says it in a small
             // message: what there is now.  Taken in even before the lists, which
             // it is not, being at most a few items.
-            if let Some(updates) = guarded("item changes", || matches_item_changes(&command))
-                && updates.iter().all(|item| self.player_data.knows_item(item.item_id))
-            {
+            // The first of a kind (a flower picked for the first time) is a stack
+            // that is new: the message is as strict as for the others, so it is
+            // taken as well.
+            if let Some(updates) = guarded("item changes", || matches_item_changes(&command)) {
                 let applied = self.player_data.apply_item_changes(&updates);
                 let changes = applied.stacks;
                 let weapons = applied.weapons;
@@ -570,6 +1080,24 @@ impl Monitor {
                     self.record(format!("FOUND item changes: {changes:?} weapons {weapon_ids:?}"));
                     self.unsaved = true;
                     has_new_data = true;
+                    if let Some(opened) = self.chests.rewards() {
+                        self.chest_opened(opened);
+                    }
+                    // Something picked up by a marker of its name: that marker is picked.
+                    if self.captured.items
+                        && let Some((scene, floor, _)) = self.motion_scene
+                        && let Some(scene_map) = self.scenes.map_of(scene)
+                        && let Some(position) = self.puzzles.position(scene)
+                    {
+                        for (id, delta) in &changes {
+                            if (1..=3).contains(delta)
+                                && let Some(item) = crate::live_data::item(*id)
+                            {
+                                self.puzzles.picked_up(&item.name.en, scene_map, position, floor);
+                            }
+                        }
+                        self.publish_chest_marks();
+                    }
                     // Said only when the full list of this connection is in, so
                     // that what is shown was a change and not a correction.
                     if self.captured.items {
@@ -830,4 +1358,23 @@ fn load_keys() -> Result<HashMap<u16, Vec<u8>>> {
     keys.iter()
         .map(|(key, value)| -> Result<_, _> { Ok((*key, BASE64_STANDARD.decode(value)?)) })
         .collect::<Result<HashMap<_, _>>>()
+}
+
+/// Where the session key of the connection is kept.
+fn session_key_path() -> Option<std::path::PathBuf> {
+    eframe::storage_dir(crate::APP_ID).map(|dir| dir.join("session_key.bin"))
+}
+
+fn load_session_key() -> Option<Vec<u8>> {
+    let key = std::fs::read(session_key_path()?).ok()?;
+    (!key.is_empty()).then_some(key)
+}
+
+fn save_session_key(key: &[u8]) {
+    if let Some(path) = session_key_path() {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, key);
+    }
 }

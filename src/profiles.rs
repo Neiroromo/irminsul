@@ -185,6 +185,10 @@ pub fn list() -> Vec<ProfileSummary> {
 }
 
 pub fn delete_in(dir: &Path, uid: u32) -> Result<()> {
+    // The chests of the account go with it.
+    let _ = fs::remove_file(path_in(&dir.join("chests"), uid));
+    let _ = fs::remove_file(dir.join("chests").join(format!("{uid}.coverage")));
+    let _ = fs::remove_file(dir.join("markers").join(format!("{uid}.json")));
     match fs::remove_file(path_in(dir, uid)) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),

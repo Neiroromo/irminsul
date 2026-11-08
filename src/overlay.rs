@@ -67,7 +67,8 @@ pub struct OverlaySettings {
     /// How big the text in them is, 0.6 to 1.7.
     #[serde(default = "default_one")]
     pub text_scale: f32,
-    /// Shown only while Genshin Impact or Irminsul is the window in front.
+    /// Shown only while Genshin Impact is the window in front: not over
+    /// Irminsul or any other window.
     #[serde(default)]
     pub only_in_focus: bool,
 }
@@ -353,10 +354,7 @@ impl Overlay {
                     changed |= ui
                         .checkbox(
                             &mut settings.only_in_focus,
-                            tr(
-                                "Show only while Genshin Impact or Irminsul is in front",
-                                "Показывать только когда Genshin Impact или Irminsul на переднем плане",
-                            ),
+                            tr("Only over the game", "Только поверх игры"),
                         )
                         .changed();
                     ui.label(
@@ -1058,7 +1056,7 @@ fn is_game_program(path: &str) -> bool {
 }
 
 /// Tells the thread that shows and hides the window whether the window is up and
-/// whether it is only to be shown while the game or Irminsul is in front.  The
+/// whether it is only to be shown while the game is in front.  The
 /// thread is started the first time.
 fn watch(open: bool, only_in_focus: bool, ctx: &Context) {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1077,7 +1075,7 @@ fn watch(open: bool, only_in_focus: bool, ctx: &Context) {
                 std::thread::sleep(Duration::from_millis(100));
                 let wanted = !OPEN.load(Ordering::Relaxed)
                     || !ONLY_IN_FOCUS.load(Ordering::Relaxed)
-                    || game_or_us_in_front();
+                    || game_in_front();
                 if wanted != hidden {
                     continue;
                 }
@@ -1127,9 +1125,15 @@ fn show_window(_show: bool) -> bool {
     true
 }
 
-/// Whether the window in front is the game's or one of ours.
+/// Whether the window in front is the game's.
+fn game_in_front() -> bool {
+    what_is_in_front() == crate::hotkey::FRONT_GAME
+}
+
+/// What is in front: the game, one of our windows, or something else.
 #[cfg(windows)]
-fn game_or_us_in_front() -> bool {
+pub(crate) fn what_is_in_front() -> u8 {
+    use crate::hotkey::{FRONT_GAME, FRONT_OTHER, FRONT_US};
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -1143,12 +1147,12 @@ fn game_or_us_in_front() -> bool {
     unsafe {
         let window = GetForegroundWindow();
         if window.0.is_null() {
-            return false;
+            return FRONT_OTHER;
         }
         let mut process = 0u32;
         GetWindowThreadProcessId(window, Some(&mut process));
         if process == std::process::id() {
-            return true;
+            return FRONT_US;
         }
         // The game's window says what it is, which does not need the right to
         // look into its program, which a protected one may not give.
@@ -1156,10 +1160,10 @@ fn game_or_us_in_front() -> bool {
         let length = GetWindowTextW(window, &mut title).max(0) as usize;
         let title = String::from_utf16_lossy(&title[..length.min(title.len())]);
         if is_game_window(&title) {
-            return true;
+            return FRONT_GAME;
         }
         let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process) else {
-            return false;
+            return FRONT_OTHER;
         };
         let mut buffer = [0u16; 520];
         let mut length = buffer.len() as u32;
@@ -1171,13 +1175,17 @@ fn game_or_us_in_front() -> bool {
         )
         .is_ok();
         let _ = CloseHandle(handle);
-        queried && is_game_program(&String::from_utf16_lossy(&buffer[..length as usize]))
+        if queried && is_game_program(&String::from_utf16_lossy(&buffer[..length as usize])) {
+            FRONT_GAME
+        } else {
+            FRONT_OTHER
+        }
     }
 }
 
 #[cfg(not(windows))]
-fn game_or_us_in_front() -> bool {
-    true
+pub(crate) fn what_is_in_front() -> u8 {
+    crate::hotkey::FRONT_GAME
 }
 
 /// Whether Alt is held, in any window: the overlay is not the one with the
