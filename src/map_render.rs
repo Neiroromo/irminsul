@@ -166,6 +166,58 @@ impl Canvas {
         }
     }
 
+    /// How far a place is from a rectangle with round corners: below 0 inside, above 0 outside.
+    fn round_distance(px: f32, py: f32, (x0, y0, x1, y1): (f32, f32, f32, f32), radius: f32) -> f32 {
+        let (cx, cy) = ((x0 + x1) / 2., (y0 + y1) / 2.);
+        let (hx, hy) = ((x1 - x0) / 2. - radius, (y1 - y0) / 2. - radius);
+        let (dx, dy) = ((px - cx).abs() - hx, (py - cy).abs() - hy);
+        dx.max(0.).hypot(dy.max(0.)) + dx.max(dy).min(0.) - radius
+    }
+
+    /// A rectangle with round corners, filled; and a line of `width` around it on the
+    /// outside (`outside`) or on the inside, as the program's own map draws them.
+    #[allow(clippy::too_many_arguments)]
+    fn round_rect(
+        &mut self,
+        rect: (f32, f32, f32, f32),
+        radius: f32,
+        fill: Option<([u8; 3], f32)>,
+        line: Option<([u8; 3], f32, f32, bool)>,
+    ) {
+        let reach = line.map_or(0., |(_, _, width, _)| width) + 2.;
+        for py in (rect.1 - reach).floor() as i32..(rect.3 + reach).ceil() as i32 {
+            for px in (rect.0 - reach).floor() as i32..(rect.2 + reach).ceil() as i32 {
+                let d = Self::round_distance(px as f32 + 0.5, py as f32 + 0.5, rect, radius);
+                if let Some((colour, share)) = fill {
+                    let cover = (0.5 - d).clamp(0., 1.);
+                    if cover > 0. {
+                        self.blend(px, py, colour, share * cover);
+                    }
+                }
+                if let Some((colour, share, width, outside)) = line {
+                    let (inner, outer) = if outside { (0., width) } else { (-width, 0.) };
+                    let cover = ((d - inner + 0.5).clamp(0., 1.)) * ((outer - d + 0.5).clamp(0., 1.));
+                    if cover > 0. {
+                        self.blend(px, py, colour, share * cover);
+                    }
+                }
+            }
+        }
+    }
+
+    /// A horizontal line `width` thick, its ends cut square, centred on `y`.
+    fn hline(&mut self, x0: f32, x1: f32, y: f32, width: f32, colour: [u8; 3], share: f32) {
+        for py in (y - width).floor() as i32..(y + width).ceil() as i32 {
+            let cover = (width / 2. + 0.5 - (py as f32 + 0.5 - y).abs()).clamp(0., 1.);
+            if cover <= 0. {
+                continue;
+            }
+            for px in x0.floor() as i32..x1.ceil() as i32 {
+                self.blend(px, py, colour, share * cover);
+            }
+        }
+    }
+
     /// A line around the inside of a rectangle, `width` thick.
     fn frame_rect(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, colour: [u8; 3], share: f32) {
         self.fill_rect(x0, y0, x1, y0 + width, colour, share);
@@ -692,25 +744,26 @@ fn draw_chest(canvas: &mut Canvas, x: f32, y: f32, tier: u8, look: IconLook) {
         3 => 7.5,
         _ => 7.,
     };
-    let (x0, y0, x1, y1) = (x - half, y - half * 0.8, x + half, y + half * 0.8);
+    // The same as the chest of the map of the program (`map_tab::draw_chest`): round corners
+    // (3), the lid at 38 %, the same colours and the same strengths.
+    let rect = (x - half, y - half * 0.8, x + half, y + half * 0.8);
+    let (x0, y0, x1, y1) = rect;
     let colour = tier_rgb(tier);
+    let lid = y0 + (y1 - y0) * 0.38;
     match look {
         IconLook::Faint => {
-            canvas.fill_rect(x0, y0, x1, y1, [0x15, 0x1a, 0x24], 0.6);
-            canvas.frame_rect(x0, y0, x1, y1, 1.2, colour, 0.75);
-            canvas.fill_rect(x0, y0 + (y1 - y0) * 0.38, x1, y0 + (y1 - y0) * 0.38 + 1., colour, 0.75);
+            canvas.round_rect(rect, 3., Some(([0x15, 0x1a, 0x24], 0.59)), Some((colour, 0.7, 1.2, false)));
+            canvas.hline(x0, x1, lid, 1.0, colour, 0.7);
         }
         _ => {
             let (fill, share) = match look {
-                IconLook::Opened => (OPENED, 0.85),
-                IconLook::Likely => (OPENED, 0.55),
+                IconLook::Opened => (OPENED, 0.8),
+                IconLook::Likely => (OPENED, 0.5),
                 _ => (colour, 1.),
             };
-            canvas.fill_rect(x0, y0, x1, y1, fill, share);
-            canvas.frame_rect(x0 - 1., y0 - 1., x1 + 1., y1 + 1., 1.5, EDGE, 0.95);
-            let lid = y0 + (y1 - y0) * 0.38;
-            canvas.fill_rect(x0, lid - 0.6, x1, lid + 0.7, EDGE, 0.95);
-            canvas.disc(x, lid, 1.6, EDGE, 0.95);
+            canvas.round_rect(rect, 3., Some((fill, share)), Some((EDGE, 1., 1.5, true)));
+            canvas.hline(x0, x1, lid, 1.3, EDGE, 1.);
+            canvas.disc(x, lid, 1.6, EDGE, 1.);
         }
     }
 }

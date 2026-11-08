@@ -51,6 +51,27 @@ impl Label {
     pub fn name(&self, russian: bool) -> &str {
         if russian && !self.ru.is_empty() { &self.ru } else { &self.en }
     }
+
+    /// Whether a marker of this kind can be marked collected by hand: what is taken once and
+    /// is never there again (oculi and the like, chests, puzzles, waypoints, finds).  What
+    /// comes back (enemies, plants, ores, specialties, wood, animals, fish, what is picked up
+    /// in the field) can not be marked yet: it would have to be taken off again by the clock.
+    pub fn can_be_marked(&self) -> bool {
+        if self.refresh > 0 {
+            return false;
+        }
+        // The groups whose kinds are taken once: waypoints, special items (oculi ...),
+        // chests, puzzles; and of the group "Experience" these kinds only (the chests of mora,
+        // seals, secret places, books, recipes, viewpoints, gates, courts ...).
+        const ONCE_GROUPS: [u32; 4] = [1, 4, 13, 186];
+        const ONCE_EXPERIENCE: [u32; 31] = [
+            129, 359, 366, 596, 329, 723, 819, 838, 361, 395, 424, 260, 321, 332, 330, 331, 639, 724, 792, 839, 793, 264, 87, 111, 112,
+            85, 253, 322, 147, 189, 156,
+        ];
+        const EXPERIENCE: u32 = 51;
+        let group = if self.parent == 0 { self.id } else { self.parent };
+        ONCE_GROUPS.contains(&group) || (group == EXPERIENCE && (ONCE_EXPERIENCE.contains(&self.id) || [159, 268].contains(&self.id)))
+    }
 }
 
 /// A marker: where it is on the map, from the origin of the map.
@@ -524,5 +545,24 @@ mod tests {
         store.collect(points[1].id, 100);
         let counts = store.done_counts(&data, 200);
         assert_eq!(counts.get(&label), Some(&2));
+    }
+}
+
+#[cfg(test)]
+mod can_be_marked_tests {
+    use super::*;
+
+    #[test]
+    fn only_what_is_taken_once_can_be_marked() {
+        let data = data();
+        let can = |id: u32| data.label(id).is_some_and(|label| label.can_be_marked());
+        // Oculi, chests, puzzles, mora chests, seals: yes.
+        for id in [5, 6, 194, 17, 269, 18, 70, 129, 260] {
+            assert!(can(id), "label {id} is taken once");
+        }
+        // Enemies, ores, plants, specialties, wood, animals, fishing spots: no.
+        for id in [55, 172, 161, 34, 174, 284, 261, 114] {
+            assert!(!can(id), "label {id} comes back");
+        }
     }
 }

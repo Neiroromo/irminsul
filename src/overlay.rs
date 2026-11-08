@@ -99,6 +99,9 @@ struct Choice {
 struct Anim {
     fade: f32,
     pos: Pos2,
+    /// The number that is shown (per cent, or how many there are): it goes to the real one a
+    /// step at a time, through the ones between.
+    value: f32,
 }
 
 /// A picture in the window, one material or a whole chain of them.
@@ -110,6 +113,10 @@ struct Entry {
     color: Color32,
     /// All of it is there.
     done: bool,
+    /// The number in the label (per cent, or how many there are) and, if it is of the kind
+    /// "there/needed", how many are needed: for showing the number going to its value.
+    value: f32,
+    need: Option<u64>,
 }
 
 /// A line of the list to pick from.
@@ -758,6 +765,8 @@ fn entries(
                     label: format!("{whole}%"),
                     color: if whole >= 100 { OK } else { AMBER },
                     done: whole >= 100,
+                    value: whole as f32,
+                    need: None,
                 });
             }
             None => {
@@ -768,6 +777,8 @@ fn entries(
                     label: format!("{}/{}", compact(have), compact(need)),
                     color: if have >= need { OK } else { BAD },
                     done: have >= need,
+                    value: have as f32,
+                    need: Some(need),
                 });
             }
         }
@@ -800,6 +811,7 @@ fn draw_entries(
         let state = anim.entry(entry.key).or_insert(Anim {
             fade: target,
             pos: Pos2::ZERO,
+            value: entry.value,
         });
         let step = FADE_RATE * dt;
         if (state.fade - target).abs() > 0.004 {
@@ -807,6 +819,17 @@ fn draw_entries(
             moving = true;
         } else {
             state.fade = target;
+        }
+        // The number goes to its value through the ones between: at least 14 a second, and
+        // all of the way in half a second at most.
+        let gap = (entry.value - state.value).abs();
+        if gap > 0.01 {
+            let speed = (gap / 0.5).max(14.);
+            let step = speed * dt;
+            state.value += (entry.value - state.value).clamp(-step, step);
+            moving = true;
+        } else {
+            state.value = entry.value;
         }
     }
     anim.retain(|key, _| entries.iter().any(|entry| entry.key == *key));
@@ -862,7 +885,13 @@ fn draw_entries(
             icon: material.map_or("", |m| m.icon.as_str()),
             rarity: material.map_or(1, |m| m.rarity.max(1)),
             stars: false,
-            label: Some((entry.label.clone(), entry.color)),
+            label: Some((
+                match entry.need {
+                    None => format!("{}%", anim[&entry.key].value.round().max(0.) as u32),
+                    Some(need) => format!("{}/{}", compact(anim[&entry.key].value.round().max(0.) as u64), compact(need)),
+                },
+                entry.color,
+            )),
             selected: false,
         };
         // Fading shrinks the picture around its middle.

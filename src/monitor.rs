@@ -165,6 +165,9 @@ pub struct Monitor {
     active_nickname: Option<String>,
     timeline: DebugTimeline,
     sniffer: GameSniffer,
+    /// The program joined a connection that was running (no login was seen): the stored data
+    /// of the account is what there is, and is not cleared while the account is not known.
+    resumed: bool,
     /// A session key was found and is not kept yet.
     session_key_changed: bool,
     /// Where the player was last told by the game to be (scene, floor, how far the radar
@@ -218,6 +221,7 @@ impl Monitor {
         let player_data = PlayerData::new(game_data);
         let keys = load_keys()?;
         let session_key_changed = false;
+        let resumed = false;
         let motion_scene = None;
         let motion_at = Instant::now();
         let command_counts = Default::default();
@@ -248,6 +252,7 @@ impl Monitor {
             timeline: DebugTimeline::new(),
             sniffer,
             session_key_changed,
+            resumed,
             motion_scene,
             motion_at,
             command_counts,
@@ -370,6 +375,7 @@ impl Monitor {
             self.save_session();
         }
         self.session_uid = None;
+        self.resumed = false;
         self.motion_scene = None;
         self.location_uid = None;
         self.foreign_location = None;
@@ -391,6 +397,18 @@ impl Monitor {
     fn learned_uid(&mut self, uid: u32) {
         self.session_uid = Some(uid);
         self.record(format!("player id {uid} (found next to the name)"));
+        // What is loaded is of another account: it is dropped, not stored under this one.
+        let other_account = self.active_uid.is_some_and(|active| active != uid);
+        if other_account {
+            self.unsaved = false;
+            self.select_profile(Some(uid));
+            if let Some(name) = &self.session_nickname {
+                self.active_nickname = Some(name.clone());
+            }
+            self.chests_for_session();
+            self.publish_chests();
+            return;
+        }
         if self.active_uid.is_none() {
             self.active_uid = Some(uid);
             self.active_nickname = self.session_nickname.clone();
@@ -497,19 +515,24 @@ impl Monitor {
         if version != self.watch_published {
             self.watch_published = version;
             let mut marks = self.watch.snapshot();
-            let objects = self.objects.snapshot();
-            let quests = self.quests.snapshot();
-            let puzzles = self.puzzles.snapshot();
-            // What a puzzle's own record says is done is not undone by an older sighting of its
-            // objects kept by the watch of the things done once.
-            let done: std::collections::HashSet<u32> = puzzles.opened.iter().map(|(marker, _)| *marker).collect();
-            marks.opened.extend(puzzles.opened);
             marks.version = version;
-            marks.opened.extend(objects.opened);
-            marks.closed.extend(objects.closed);
-            marks.opened.extend(quests.opened);
-            marks.closed.extend(quests.closed);
-            marks.closed.retain(|marker| !done.contains(marker));
+            // Only the chests of the other maps are given to the maps for now: what the
+            // watches of the oculi, seelies, puzzles, gathering and quests say is kept apart,
+            // not used (see `EXTRA_MARKS` and docs/tracking-logic.md).
+            if EXTRA_MARKS {
+                let objects = self.objects.snapshot();
+                let quests = self.quests.snapshot();
+                let puzzles = self.puzzles.snapshot();
+                // What a puzzle's own record says is done is not undone by an older sighting
+                // of its objects kept by the watch of the things done once.
+                let done: std::collections::HashSet<u32> = puzzles.opened.iter().map(|(marker, _)| *marker).collect();
+                marks.opened.extend(puzzles.opened);
+                marks.opened.extend(objects.opened);
+                marks.closed.extend(objects.closed);
+                marks.opened.extend(quests.opened);
+                marks.closed.extend(quests.closed);
+                marks.closed.retain(|marker| !done.contains(marker));
+            }
             self.app_state.update_chest_marks(std::sync::Arc::new(marks));
         }
     }
@@ -592,7 +615,9 @@ impl Monitor {
     /// account than the data held, that is replaced by the stored data of it,
     /// so nothing of two accounts gets mixed.
     fn switch_to_session_account(&mut self) {
-        if self.session_uid == self.active_uid {
+        // The account is not known (yet): what is loaded stays as it is, and is not cleared.
+        // (The program started while the game ran: the account is told by the first place.)
+        if (self.session_uid.is_none() && self.resumed) || self.session_uid == self.active_uid {
             return;
         }
         self.select_profile(self.session_uid);
@@ -731,6 +756,7 @@ impl Monitor {
                     ));
                 }
                 SnifferEvent::SessionKeyResumed => {
+                    self.resumed = true;
                     self.app_state.update_capture_error(None);
                     // What comes now is kept as it comes, as after a login.
                     crate::probe::session_started();
@@ -1361,6 +1387,10 @@ fn load_keys() -> Result<HashMap<u16, Vec<u8>>> {
 }
 
 /// Where the session key of the connection is kept.
+/// Whether the marks of the oculi, seelies, puzzles, gathering and quests are given to the
+/// maps.  Off: only the chests are (they are what works well).
+const EXTRA_MARKS: bool = false;
+
 fn session_key_path() -> Option<std::path::PathBuf> {
     eframe::storage_dir(crate::APP_ID).map(|dir| dir.join("session_key.bin"))
 }

@@ -132,9 +132,11 @@ impl PlayerData {
                 finish_timestamp: achievement.finished_at,
             })
             .collect();
-        // What is stored is not a connection to compare later lists with.
-        self.character_baseline = 0;
-        self.item_baseline = 0;
+        // What is stored is what a list that comes is compared with, when the program was started
+        // while the game ran (no login is seen): a list less than half as long is a part of
+        // one, not the inventory.  A new connection (`start_session`) takes any list.
+        self.character_baseline = self.characters.len();
+        self.item_baseline = self.items.len();
     }
 
     /// Puts the chosen kinds of data into `profile`, replacing what it held.

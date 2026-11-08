@@ -512,8 +512,13 @@ impl MapOverlay {
             let icons = if unknown {
                 Vec::new()
             } else if level == 0 {
-                // The chests that are followed are those of the world.
-                if info.map == WORLD { self.icons(&info, snapshot, matched, shared) } else { Vec::new() }
+                // The chests that are followed are those of the world; the chests of the other
+                // maps are drawn as chests too, the same way, from what is marked.
+                if info.map == WORLD {
+                    self.icons(&info, snapshot, matched, shared)
+                } else {
+                    self.floor_icons(&info, &data, &std::collections::HashSet::from([0u32]), shared)
+                }
             } else {
                 self.floor_icons(&info, &data, &shown_floors, shared)
             };
@@ -526,7 +531,7 @@ impl MapOverlay {
                     if level == 0 { None } else { Some(&shown_floors) },
                     shared,
                     (view_min, view_max),
-                    level > 0 || info.map == WORLD,
+                    true,
                 )
             };
             let tiles = &self.tiles;
@@ -657,11 +662,17 @@ impl MapOverlay {
             if !shared.enabled.contains(label) {
                 continue;
             }
+            let now = markers::unix_now();
             for point in data.points_on(*label, info.map, floors) {
+                // As marked: opened (or collected) ones are grey, or not there if they are hidden.
+                let done = matches!(shared.store.state(point.id, 0, now), markers::State::Done { .. });
+                if done && shared.hide_done {
+                    continue;
+                }
                 icons.push(Icon {
                     at: [info.origin[0] + point.x, info.origin[1] + point.y],
                     tier: index as u8 + 1,
-                    look: IconLook::Closed,
+                    look: if done { IconLook::Opened } else { IconLook::Closed },
                 });
             }
         }

@@ -1140,6 +1140,8 @@ impl MapTab {
             }
             let texture = if dots { None } else { self.icons.get(label_id, &label.icon) };
             let color = label_color(label_id);
+            // The chests of the maps that are not followed are drawn as the others are: as chests.
+            let chest_tier = markers::CHEST_LABELS.iter().position(|chest| *chest == label_id).map(|index| index as u8 + 1);
             for point in points {
                 let at = to_screen(vec2(info.origin[0] + point.x, info.origin[1] + point.y));
                 if !on_screen.contains(at) {
@@ -1148,6 +1150,15 @@ impl MapTab {
                 let state = self.markers.state(point.id, label.refresh, now);
                 let done = matches!(state, MarkerState::Done { .. });
                 if done && self.only_closed {
+                    continue;
+                }
+                if let Some(tier) = chest_tier {
+                    if dots {
+                        painter.circle_filled(at, 2., tier_color(tier).gamma_multiply(if done { 0.35 } else { 0.8 }));
+                    } else {
+                        draw_chest(&painter, at, tier, if done { Look::Opened } else { Look::Closed }, 1.);
+                        hoverable.push((at, Hover::Marker(*point, label, state)));
+                    }
                     continue;
                 }
                 let strength = if done { 0.35 } else { 1. };
@@ -1294,6 +1305,7 @@ impl MapTab {
 
         // What is under the pointer: a marker found before one that is not.
         let mut clicked_marker: Option<u32> = None;
+        let mut refused: Option<String> = None;
         let mut stood_by: Option<Point> = None;
         let clicked_at = if response.clicked() { response.interact_pointer_pos() } else { None };
         if let Some(pointer) = response.hover_pos() {
@@ -1308,9 +1320,17 @@ impl MapTab {
                 });
             if let Some((_, what)) = nearest {
                 if response.clicked()
-                    && let Hover::Marker(point, ..) = what
+                    && let Hover::Marker(point, label, _) = what
                 {
-                    clicked_marker = Some(point.id);
+                    // Only what is taken once can be marked; a mark that is on can be taken off.
+                    if label.can_be_marked() || self.markers.is_collected(point.id) {
+                        clicked_marker = Some(point.id);
+                    } else {
+                        refused = Some(tr(
+                            "This comes back after a while: it can not be marked as collected yet.",
+                            "Это снова появляется со временем: отметить собранным пока нельзя.",
+                        ).to_owned());
+                    }
                 }
                 // A right click on a marker: the player stands by it.
                 if response.secondary_clicked()
@@ -1335,7 +1355,14 @@ impl MapTab {
                         ui.label(RichText::new(label.name(russian)).strong().size(15.));
                         match state {
                             MarkerState::Available => {
-                                ui.label(tr("Not collected. Click to mark it.", "Не собрано. Клик — отметить."));
+                                if label.can_be_marked() {
+                                    ui.label(tr("Not collected. Click to mark it.", "Не собрано. Клик — отметить."));
+                                } else {
+                                    ui.label(tr(
+                                        "Not collected. It comes back, so it can not be marked yet.",
+                                        "Не собрано. Появляется снова, поэтому отметить пока нельзя.",
+                                    ));
+                                }
                             }
                             MarkerState::Done { at, back } => {
                                 ui.label(
@@ -1372,6 +1399,9 @@ impl MapTab {
         if let Some(point) = clicked_marker {
             self.markers.toggle(point, now);
             self.done_counts = None;
+        }
+        if let Some(text) = refused {
+            self.notice = Some((text, std::time::Instant::now()));
         }
         if let Some(point) = stood_by {
             self.notice = Some((
