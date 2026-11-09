@@ -715,6 +715,141 @@ pub(crate) fn item_cell(ui: &mut Ui, icons: &Icons, size: f32, cell: &Cell) -> R
     response
 }
 
+/// The menu of the right button on a material (or on a chain of them: any of its items that
+/// the map knows a place of): "Show on the map", or that this cannot be shown.  Where the
+/// material is got in a domain that is not open today, it says so.
+pub(crate) fn material_menu(response: &Response, items: &[u32], russian: bool) {
+    let found = crate::markers::data().where_is(items);
+    let today = crate::markers::game_weekday();
+    let note = domain_note(&found, today, russian);
+    let data = crate::markers::data();
+    let routable: Vec<u32> = items.iter().copied().filter(|item| data.routable(*item)).collect();
+    response.context_menu(|ui| {
+        route_entry(ui, &routable, russian);
+        if found.is_empty() {
+            ui.label(
+                RichText::new(if russian {
+                    "Нет возможности отобразить на карте"
+                } else {
+                    "It can not be shown on the map"
+                })
+                .color(DIM),
+            );
+            return;
+        }
+        if ui.button(if russian { "Показать на карте" } else { "Show on the map" }).clicked() {
+            crate::map_tab::request_show(
+                crate::map_tab::ShowRequest {
+                    labels: found.labels.clone(),
+                    domains: found.points.clone(),
+                    note: note.clone(),
+                },
+                ui.ctx(),
+            );
+            ui.close();
+        }
+        if !found.domains.is_empty() && !found.open_on(today) {
+            ui.label(
+                RichText::new(if russian {
+                    "Сегодня может быть недоступно (не тот день)"
+                } else {
+                    "May not be open today (wrong day)"
+                })
+                .color(Color32::from_rgb(0xff, 0xc2, 0x4a)),
+            );
+        }
+    });
+}
+
+/// The entry "Add to the route" of the menu of a material: it is not offered when the item is not
+/// got in the open world (flour, what is crafted, bought ...), and it takes the item off when it is in.
+fn route_entry(ui: &mut Ui, routable: &[u32], russian: bool) {
+    if routable.is_empty() {
+        ui.add_enabled(false, egui::Button::new(if russian { "Добавить в маршрут" } else { "Add to the route" }))
+            .on_disabled_hover_text(if russian {
+                "Нельзя: этого предмета нет в открытом мире (его не собрать по меткам карты)"
+            } else {
+                "Not possible: this item is not got in the open world (no markers of it on the map)"
+            });
+        return;
+    }
+    let all_in = routable.iter().all(|item| crate::map_tab::route_has(*item));
+    let label = match (all_in, russian) {
+        (true, true) => "Убрать из маршрута",
+        (true, false) => "Take off the route",
+        (false, true) => "Добавить в маршрут",
+        (false, false) => "Add to the route",
+    };
+    if ui.button(label).clicked() {
+        crate::map_tab::request_route(routable, !all_in, ui.ctx());
+        ui.close();
+    }
+}
+
+/// The button "Show on the map" of the details of a material (disabled with a note when the map
+/// knows no place of it).
+fn show_on_map_button(ui: &mut Ui, items: &[u32], russian: bool) {
+    let found = crate::markers::data().where_is(items);
+    let today = crate::markers::game_weekday();
+    if found.is_empty() {
+        ui.add_enabled(false, egui::Button::new(if russian { "Показать на карте" } else { "Show on the map" }))
+            .on_disabled_hover_text(if russian { "Нет возможности отобразить на карте" } else { "It can not be shown on the map" });
+        return;
+    }
+    if ui.button(if russian { "Показать на карте" } else { "Show on the map" }).clicked() {
+        crate::map_tab::request_show(
+            crate::map_tab::ShowRequest {
+                labels: found.labels.clone(),
+                domains: found.points.clone(),
+                note: domain_note(&found, today, russian),
+            },
+            ui.ctx(),
+        );
+    }
+    if !found.domains.is_empty() && !found.open_on(today) {
+        ui.label(
+            RichText::new(if russian {
+                "Сегодня может быть недоступно (не тот день)"
+            } else {
+                "May not be open today (wrong day)"
+            })
+            .size(12.)
+            .color(Color32::from_rgb(0xff, 0xc2, 0x4a)),
+        );
+    }
+}
+
+/// What is told over the map for domains: which ones, on which days, and a warning when none is
+/// open today.
+fn domain_note(found: &crate::markers::Where, today: u8, russian: bool) -> String {
+    if found.domains.is_empty() {
+        return String::new();
+    }
+    const RU: [&str; 7] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+    const EN: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    let names = if russian { RU } else { EN };
+    let days = |days: &[u8]| days.iter().filter_map(|day| names.get(*day as usize)).copied().collect::<Vec<_>>().join(", ");
+    let mut lines: Vec<String> = found
+        .domains
+        .iter()
+        .map(|domain| format!("{} ({})", if russian { &domain.ru } else { &domain.en }, days(&domain.days)))
+        .collect();
+    lines.dedup();
+    lines.truncate(4);
+    if !found.open_on(today) {
+        lines.insert(
+            0,
+            if russian {
+                format!("Сегодня ({}) это в подземелье может быть недоступно: не тот день.", names[today as usize])
+            } else {
+                format!("It may not be available in the domain today ({}): wrong day.", names[today as usize])
+            },
+        );
+    }
+    lines.join("
+")
+}
+
 /// A clickable card of a list, with the picture of what it is of.  Returns
 /// whether it was clicked.
 pub(crate) fn list_card(
@@ -802,7 +937,8 @@ fn cost_cells(
                             label: None,
                             selected: false,
                         };
-                        item_cell(ui, icons, 52., &cell).on_hover_text(&name);
+                        let response = item_cell(ui, icons, 52., &cell).on_hover_text(&name);
+                        material_menu(&response, &[*id], russian);
                         ui.add(
                             egui::Label::new(RichText::new(&name).size(11.).color(DIM)).truncate(),
                         );
@@ -1746,6 +1882,7 @@ impl RosterTab {
                                             };
                                             let response = item_cell(ui, icons, 76., &cell)
                                                 .on_hover_text(material.name.get(russian));
+                                            material_menu(&response, &[*id], russian);
                                             if response.clicked() {
                                                 clicked = Some(*id);
                                             }
@@ -1928,6 +2065,8 @@ fn material_detail(
                     ui.end_row();
                 }
             });
+        ui.add_space(6.);
+        show_on_map_button(ui, &[id], russian);
     });
 
     // Who upgrades with it, as pictures: the ones on the account first.

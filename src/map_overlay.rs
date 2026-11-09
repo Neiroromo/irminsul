@@ -143,6 +143,8 @@ static LOOK_CHANGED: AtomicBool = AtomicBool::new(true);
 /// The markers chosen on the map of the program, which this map shows too.
 pub struct SharedMarkers<'a> {
     pub enabled: &'a std::collections::BTreeSet<u32>,
+    /// The kinds that can be marked as collected: the others are never shown as collected.
+    pub markable: &'a std::collections::BTreeSet<u32>,
     pub store: &'a markers::Store,
     /// Not the ones that are collected (nor the chests that are opened).
     pub hide_done: bool,
@@ -630,7 +632,8 @@ impl MapOverlay {
                 if at[0] < low.x || at[0] > high.x || at[1] < low.y || at[1] > high.y {
                     continue;
                 }
-                let done = matches!(shared.store.state(point.id, label.refresh, now), markers::State::Done { .. });
+                let done = shared.markable.contains(id)
+                    && matches!(shared.store.state(point.id, label.refresh, now), markers::State::Done { .. });
                 if done && shared.hide_done {
                     continue;
                 }

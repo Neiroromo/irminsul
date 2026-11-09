@@ -20,7 +20,7 @@ use crate::icons::Icons;
 use crate::live_data;
 use crate::player_data::Roster;
 use crate::roster_tab::{
-    BAD, Cell, MORA, OK, add_step, ascension_of, card, depot_of, element, item_cell,
+    BAD, Cell, MORA, OK, add_step, ascension_of, card, depot_of, element, item_cell, material_menu,
     language_choice, level_of, merge, section, stars, talent_level, weapon_type_name,
 };
 use crate::upgrade_data::{Step, Text, UpgradeData};
@@ -375,11 +375,12 @@ fn need_cells(
                             label: None,
                             selected: false,
                         };
-                        item_cell(ui, icons, 56., &cell).on_hover_text(format!(
+                        let response = item_cell(ui, icons, 56., &cell).on_hover_text(format!(
                             "{name}\n{} / {}",
                             grouped(have),
                             grouped(need)
                         ));
+                        material_menu(&response, &[*id], russian);
                         ui.add(
                             egui::Label::new(RichText::new(&name).size(11.).color(DIM)).truncate(),
                         );
@@ -572,7 +573,8 @@ fn percent_cell(
             label: None,
             selected: false,
         };
-        item_cell(ui, icons, 56., &cell).on_hover_text(tiers.join("\n"));
+        let response = item_cell(ui, icons, 56., &cell).on_hover_text(tiers.join("\n"));
+        material_menu(&response, &family.ids, russian);
         ui.add(egui::Label::new(RichText::new(name_of(top)).size(11.).color(DIM)).truncate());
         ui.add(
             egui::Label::new(RichText::new(format!("{percent}%")).size(13.).strong().color(color))
@@ -605,11 +607,12 @@ fn need_cell(
             label: None,
             selected: false,
         };
-        item_cell(ui, icons, 56., &cell).on_hover_text(format!(
+        let response = item_cell(ui, icons, 56., &cell).on_hover_text(format!(
             "{name}\n{} / {}",
             grouped(have),
             grouped(need)
         ));
+        material_menu(&response, &[id], russian);
         ui.add(egui::Label::new(RichText::new(&name).size(11.).color(DIM)).truncate());
         ui.add(
             egui::Label::new(

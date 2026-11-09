@@ -1,54 +1,87 @@
-![Screenshot](docs/src/images/main-window.webp)
+# Irminsul
 
-# Resources
+**English** · [Русский](README.ru.md)
 
-- [Docs](https://konkers.github.io/irminsul)
-- [Discord](https://discord.gg/aQqdZPHEpP)
+> This is a fork of [konkers/irminsul](https://github.com/konkers/irminsul), the original packet-capture exporter for Genshin Impact. The original project is licensed under the MIT License, and the license file is kept in this repository.
 
-# Introduction
+Irminsul reads Genshin Impact's network traffic (packet capture, no screen scanning) and turns it into data you can use: a [Genshin Optimizer](https://frzyc.github.io/genshin-optimizer/) export in the GOOD format, a character and material browser, a farming planner, and a live map that knows what you have already collected.
 
-Irminsul is a utility to extract data from Genshin Impact and export it for use with [Genshin Optimizer](https://frzyc.github.io/genshin-optimizer/) and web sites, applications, and utilities that use the [GOOD](https://frzyc.github.io/genshin-optimizer/#/doc) data format.
-
-Irminsul utilizes packet capture instead of the common optical character recognition (OCR) that other [scanners](https://frzyc.github.io/genshin-optimizer/#/scanner) use. This allows it to be much quicker in exchange for 1. needing to run with admin/root privaleges (for the packet capture) and 2. needing to be run when genshin starts to observe the handshake with the server.
-
-## Dependencies
-
-To use the `pcap` capture backend, make sure to install a Pcap library (Npcap/WinPcap on Windows, libpcap on Linux). The released Linux binary has libpcap linked into it, so this only applies there when building Irminsul yourself.
-
-## Command line options
-
-Irminsul accepts a handful of command line options for advanced use cases:
-
-- `--capture-backend <pktmon|pcap>`: chooses which capture backend to use. On Windows both `pktmon` (default) and `pcap` are available. On other platforms only `pcap` is available.
-- `--no-admin`: skips the automatic elevation prompt. This can be useful when you prefer to launch the application without requesting higher privileges up front.
+Nothing is injected into the game and no game files are modified.
 
 ## Features
 
-In it's current state Irminsul supports:
+### Inherited from the original
 
-- Incredibly fast capture of all Genshin Optimizer supported data
-  - Artifacts including "unactivated" rolls and reporting of initial values for rolls
-  - Weapons
-  - Materials
-  - Characters
-- Simple, clean UI
-- Export settings to filter which data gets exported
-- Exports data either to the clipboard or saved to a file
+- Export of artifacts, weapons, materials and characters in the [GOOD](https://frzyc.github.io/genshin-optimizer/#/doc) format, to the clipboard or to a file, with settings for what to export
+- Achievement export and an achievement tracker
 
-Planned features include:
+### Added in this fork
 
-- Achievement export
-- Wish history export
-- Real time data updates while game is running
+**Account data**
 
-## Thanks
+- Characters and Materials tabs with the data of the captured account, in English or Russian
+- Characters and weapons that are not yet in the built-in data are filled in from live game data
+- One profile per game account, always holding the freshest capture, with switching between accounts
+- Starting the game through HoYoPlay in a way that lets Irminsul see its traffic, optional start with Windows, tray mode, and a progress popup while the capture runs
+- A "what changed" popup showing the mora and items you gained or spent while playing
+- Resuming the capture after restarting the program, without restarting the game
 
-Irmunsil is built upon the work of many others.
+**Planner**
 
-- [PJK136](https://github.com/PJK136) whose work on a [fork of `stardb-exporter`](https://github.com/PJK136/stardb-exporter) provided the main inspiration for Irminsul's development.
-- [juliuskreutz](https://github.com/juliuskreutz) whose [`stardb-exporter`](https://github.com/juliuskreutz/stardb-exporter) provided the foundation for PJK136's work as well as providing some examples for how to wrangle [`egui`](https://github.com/emilk/egui).
-- [hashblen](https://github.com/hashblen) whose [`auto-artifactarioum`](https://github.com/hashblen/auto-artifactarium) is used to interpret the network packets from Genshin.
-- [IceDynamix](https://github.com/IceDynamix/) whose work on Honkai Star Rail network scanning is at the root of many of the Genshin and HSR network scanning utilities.
-- [emmachase](https://github.com/emmachase) who wrote the packet capture library [`pktmon`](https://github.com/emmachase/pktmon) which Irminsul uses to allow packet capture without having to install a npcap driver as well as their contributions to some of the above projects.
-- [Genshin Optimizer](https://frzyc.github.io/genshin-optimizer/) without which there would be no point in exporting data.
-- [Inventory Kamera](https://github.com/Andrewthe13th/Inventory_Kamera) which was my introduction into artifact and character scanning and whose discord provided a collaboration environment that spawned Irminsul.
+- Pick characters and weapons, set target levels and talents, and see in total what has to be farmed and how much of it you already have
+- Domains with the days they are open, the materials and artifacts they give, and their one-time first-clear rewards
+
+**Interactive map**
+
+- The official interactive map: all regions and underground places, floors, and filters for every kind of marker
+- The collected state is taken from the game itself for oculi, chests, puzzles, seelies, world quests and challenges, plus manual marks for what the game does not report
+- Your position and floor, and a map overlay that can be shown over the game with a hotkey
+- **Show on the map** for any material, from the Materials tab, the planner and the right-click menu: the plants, ores, enemies, ley lines and domains where it comes from
+- Weekly bosses, old one-time domains and artifact domains, with their rewards shown on click
+- Resin bosses are marked as such instead of showing a respawn time
+
+**Route planner**
+
+- Choose materials or kinds of markers to farm, optionally counting teleport waypoints, and generate a route over all of them
+- The route is split into numbered stages (teleport, collect, then the next stage), drawn as colored lines with arrows that stay readable at any zoom, with the jumps between stages shown dashed
+- Step through the route with Start, Next step and Back; the map follows the current stage
+- Nearby points are collected together before the route moves on, and the floors of underground places are taken into account
+- Add a material to the route from its right-click menu; items that cannot be farmed in the open world are not offered
+
+**Events timeline**
+
+- Current and upcoming events from the game's official announcements, game versions, and periodic resets such as the Spiral Abyss and the Imaginarium Theater
+
+## Requirements
+
+- Windows 10 (version 1809 or newer) or Windows 11, 64-bit
+- Administrator rights. Irminsul asks for them on start; they are needed to observe the game's traffic
+- [Microsoft Visual C++ Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe). The program needs it, and most systems already have it. [Official page](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
+- Internet access. Map tiles, icons, marker data and live game data are downloaded and cached
+- Optional: [Npcap](https://npcap.com/#download), only if you run the program with `--capture-backend pcap`
+
+The program is a single `irminsul.exe`: all other data is built in, and the profiles and cache are stored in `%APPDATA%\Irminsul`.
+
+## Getting started
+
+1. Download `irminsul.exe` from the [latest release](https://github.com/Neiroromo/irminsul/releases/latest).
+2. Run it and accept the administrator prompt.
+3. Start the packet capture, then start the game and enter the door (or use the built-in game launcher). Irminsul has to be running before the game reaches the login handshake.
+4. When the checkmarks appear, the tabs fill with your data.
+
+## Command line options
+
+- `--capture-backend <pktmon|pcap>` (`-b`): `pktmon` is the default and needs no driver; `pcap` needs Npcap and a build with the `pcap` feature
+- `--no-admin`: skip the automatic elevation prompt
+
+## Building
+
+```
+cargo build --release
+```
+
+The build needs a network connection, because it fetches some game data.
+
+## License
+
+MIT License, as in the original project. See `LICENSE` and `THIRD_PARTY_NOTICES.md`.

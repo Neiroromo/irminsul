@@ -131,6 +131,7 @@ enum MainTab {
     Planner,
     Chests,
     Map,
+    Events,
 }
 
 #[derive(Clone, Debug)]
@@ -168,6 +169,7 @@ pub struct IrminsulApp {
     achievement_tab: AchievementTab,
     roster_tab: RosterTab,
     chests_tab: crate::chests_tab::ChestsTab,
+    events_tab: crate::events_tab::EventsTab,
     map_tab: crate::map_tab::MapTab,
 
     restarting: bool,
@@ -355,11 +357,13 @@ impl IrminsulApp {
                 Ok("planner") => MainTab::Planner,
                 Ok("chests") => MainTab::Chests,
                 Ok("map") => MainTab::Map,
+                Ok("events") => MainTab::Events,
                 _ => MainTab::Export,
             },
             achievement_tab: AchievementTab::new(),
             roster_tab: RosterTab::new(&cc.egui_ctx),
             chests_tab: crate::chests_tab::ChestsTab::new(),
+            events_tab: crate::events_tab::EventsTab::new(&cc.egui_ctx),
             map_tab: crate::map_tab::MapTab::new(&cc.egui_ctx),
             restarting: false,
             quitting: false,
@@ -459,6 +463,15 @@ impl eframe::App for IrminsulApp {
                 }
 
                 if tracker_open {
+                    // "Show on the map" of a material: the map is opened with where it is got.
+                    if let Some(request) = crate::map_tab::take_request() {
+                        let russian = self.saved_state.achievement_progress.language == crate::achievement_data::Language::Ru;
+                        self.map_tab.show_only(request, russian);
+                        self.main_tab = MainTab::Map;
+                    }
+                    // "Add to the route" of a material.
+                    self.map_tab.route_requests(crate::map_tab::take_route_requests());
+                    self.map_tab.route_mirror();
                     let state = self.state_rx.borrow_and_update().clone();
                     Frame::new()
                         .inner_margin(Margin::symmetric(20, 0))
@@ -476,6 +489,10 @@ impl eframe::App for IrminsulApp {
                             MainTab::Materials => self.roster_tab.materials_ui(
                                 ui,
                                 &state.roster,
+                                &mut self.saved_state.achievement_progress.language,
+                            ),
+                            MainTab::Events => self.events_tab.ui(
+                                ui,
                                 &mut self.saved_state.achievement_progress.language,
                             ),
                             MainTab::Chests => self.chests_tab.ui(
@@ -696,8 +713,8 @@ impl IrminsulApp {
                         (MainTab::Characters, "Characters"),
                         (MainTab::Materials, "Materials"),
                         (MainTab::Planner, "Planner"),
-                        (MainTab::Chests, "Chests"),
                         (MainTab::Map, "Map"),
+                        (MainTab::Events, "Events"),
                     ] {
                         ui.selectable_value(
                             &mut self.main_tab,

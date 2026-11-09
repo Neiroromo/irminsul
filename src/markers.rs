@@ -24,6 +24,165 @@ use crate::{APP_ID, profiles};
 /// shows (and finds in the game) by itself.
 pub const CHEST_LABELS: [u32; 5] = [17, 44, 45, 46, 269];
 
+/// The kind of marker of the domains.
+pub const DOMAIN_LABEL: u32 = 154;
+
+/// A daily domain, from the file of the sources of materials.
+#[derive(Clone, Debug, Deserialize)]
+pub struct DomainRow {
+    pub city: u32,
+    pub kind: String,
+    /// The days it is open, 0 for Monday.
+    pub days: Vec<u8>,
+    pub en: String,
+    pub ru: String,
+}
+
+#[derive(Deserialize)]
+struct SourceFile {
+    /// Item -> kinds of marker of the enemies that drop it.
+    mobs: HashMap<u32, Vec<u32>>,
+    /// Item -> the daily domains it is got in.
+    domains: HashMap<u32, Vec<DomainRow>>,
+    /// "<city><M|F>" -> the marker of the domains of talents / weapons of that city.
+    points: HashMap<String, u32>,
+    /// Marker -> the artifact sets of the domain.
+    #[serde(default)]
+    artifacts: HashMap<u32, Vec<ArtifactSet>>,
+    /// Marker -> the one-time or trounce domain it is.
+    #[serde(default)]
+    story: HashMap<u32, StoryDomain>,
+}
+
+/// An item that a story domain gives, named in both languages.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Reward {
+    pub en: String,
+    pub ru: String,
+    pub icon: String,
+    #[serde(default)]
+    pub rank: u32,
+    /// The item of the game it is, 0 if it is not a material.
+    #[serde(default)]
+    pub id: u32,
+    /// How many (rewards of the first completion only).
+    #[serde(default)]
+    pub qty: u32,
+}
+
+/// A one-time domain (a reward for the first completion) or a trounce domain (a weekly boss).
+#[derive(Clone, Debug, Deserialize)]
+pub struct StoryDomain {
+    /// "once" or "trounce".
+    pub kind: String,
+    pub en: String,
+    pub ru: String,
+    #[serde(default)]
+    pub region: String,
+    #[serde(default)]
+    pub rewards: Vec<Reward>,
+    /// The materials only this boss drops.
+    #[serde(default)]
+    pub drops: Vec<Reward>,
+    #[serde(default)]
+    pub boss: String,
+}
+
+/// The one-time or trounce domain at a marker, if the program knows it.
+pub fn story_domain(point: u32) -> Option<&'static StoryDomain> {
+    source_file().story.get(&point)
+}
+
+/// An artifact set that a domain gives.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ArtifactSet {
+    pub id: u32,
+    pub en: String,
+    pub ru: String,
+    /// The name of its picture.
+    pub icon: String,
+}
+
+/// The artifact sets a domain of the map gives, if it is an artifact domain the program knows.
+pub fn artifact_domain(point: u32) -> Option<&'static [ArtifactSet]> {
+    source_file().artifacts.get(&point).map(Vec::as_slice).filter(|sets| !sets.is_empty())
+}
+
+/// Whether a click on this marker tells what the domain gives.
+pub fn domain_described(point: u32) -> bool {
+    artifact_domain(point).is_some() || domain_info(point).is_some() || story_domain(point).is_some()
+}
+
+fn source_file() -> &'static SourceFile {
+    static FILE: std::sync::OnceLock<SourceFile> = std::sync::OnceLock::new();
+    FILE.get_or_init(|| {
+        serde_json::from_str(include_str!("data/material_sources.json"))
+            .unwrap_or(SourceFile { mobs: HashMap::new(), domains: HashMap::new(), points: HashMap::new(), artifacts: HashMap::new(), story: HashMap::new() })
+    })
+}
+
+/// What a daily domain gives on which days.
+#[derive(Clone, Debug)]
+pub struct DomainDay {
+    pub en: String,
+    pub ru: String,
+    /// The days it is open, 0 for Monday.
+    pub days: Vec<u8>,
+    /// What it gives (the items of the game).
+    pub items: Vec<u32>,
+}
+
+/// The daily domains a marker of the map stands for (the one of the talents or of the weapons
+/// of a nation), with their days and what they give; none for any other marker.  The first is
+/// whether it is the domain of the talents.
+pub fn domain_info(point: u32) -> Option<(bool, u32, Vec<DomainDay>)> {
+    let file = source_file();
+    let key = file.points.iter().find(|(_, id)| **id == point).map(|(key, _)| key.clone())?;
+    let (city, kind) = key.split_at(key.len() - 1);
+    let city: u32 = city.parse().ok()?;
+    let talents = kind == "M";
+    let mut days: Vec<DomainDay> = Vec::new();
+    let mut items: Vec<(&u32, &Vec<DomainRow>)> = file.domains.iter().collect();
+    items.sort_by_key(|(item, _)| **item);
+    for (item, rows) in items {
+        for row in rows.iter().filter(|row| row.city == city && row.kind == kind) {
+            match days.iter_mut().find(|day| day.en == row.en) {
+                Some(day) => day.items.push(*item),
+                None => days.push(DomainDay { en: row.en.clone(), ru: row.ru.clone(), days: row.days.clone(), items: vec![*item] }),
+            }
+        }
+    }
+    days.sort_by_key(|day| day.days.first().copied().unwrap_or(7));
+    (!days.is_empty()).then_some((talents, city, days))
+}
+
+/// Where an item is got.
+#[derive(Clone, Debug, Default)]
+pub struct Where {
+    /// The kinds of marker.
+    pub labels: Vec<u32>,
+    /// The markers of the domains.
+    pub points: Vec<u32>,
+    pub domains: Vec<DomainRow>,
+}
+
+impl Where {
+    pub fn is_empty(&self) -> bool {
+        self.labels.is_empty() && self.points.is_empty()
+    }
+
+    /// Whether some domain of these is open on a day (0 for Monday); true when there are none.
+    pub fn open_on(&self, day: u8) -> bool {
+        self.domains.is_empty() || self.domains.iter().any(|domain| domain.days.contains(&day))
+    }
+}
+
+/// The day of the week of the game now, 0 for Monday: the day changes at 4 o'clock.
+pub fn game_weekday() -> u8 {
+    use chrono::Datelike;
+    (chrono::Local::now() - chrono::Duration::hours(4)).weekday().num_days_from_monday() as u8
+}
+
 /// The kinds of marker that are shown at first.
 pub const DEFAULT_SHOWN: [u32; 8] = [17, 44, 45, 46, 269, 2, 3, 154];
 
@@ -45,6 +204,10 @@ pub struct Label {
     pub refresh: u32,
     /// The item of the game it is, if it is one (plants, ores, oculi).
     pub item: u32,
+    /// A boss that is fought for resin: it is there again at once, as often as there is resin
+    /// (set when the kinds are read; see `RESIN_BOSSES`).
+    #[serde(skip)]
+    pub resin: bool,
 }
 
 impl Label {
@@ -86,6 +249,16 @@ pub struct Point {
     /// The floor it is on, 0 for the surface of the map.
     pub floor: u16,
 }
+
+/// The bosses fought for resin (the normal bosses of the game), by kind of marker.  The map says
+/// of every enemy that it comes back after 24 hours, which is not so for these: they are there
+/// again at once.
+const RESIN_BOSSES: [u32; 41] = [
+    132, 133, 135, 137, 138, 157, 181, 183, 203, 204, 262, 263, 318, 352, 390, 391, 432, 433, 452, 457, 455, 497, 498, 540, 553, 564,
+    608, 629, 660, 670, 687, 743, 744, 762, 764, 769, 788, 345, 222, 823, WAVEBINDER,
+];
+/// The kind of the Wavebinder, which the map has without a name (yet).
+const WAVEBINDER: u32 = 878;
 
 /// The group of the kinds of ore, and after how many hours it comes back when the map does not
 /// say (an assumption: not measured yet).
@@ -136,6 +309,71 @@ impl Data {
             .filter(move |point| u32::from(point.map) == map && u32::from(point.floor) == floor)
     }
 
+    /// The kinds of marker where an item of the game is got: the kinds that are that item
+    /// (plants, ores, wood, oculi ...).  Mora and the books of character experience are got
+    /// from too many places to name one: the ley line outcrops stand for them.  Empty when
+    /// the map does not tell where the item is got.
+    pub fn sources_of(&self, item: u32) -> Vec<u32> {
+        const MORA: u32 = 202;
+        const BOOKS: [u32; 3] = [104001, 104002, 104003];
+        const LEY_LINE_OUTCROPS: u32 = 572;
+        if item == MORA || BOOKS.contains(&item) {
+            return if self.points_of(LEY_LINE_OUTCROPS).is_empty() { Vec::new() } else { vec![LEY_LINE_OUTCROPS] };
+        }
+        self.labels
+            .iter()
+            .filter(|label| label.item == item && !self.points_of(label.id).is_empty())
+            .map(|label| label.id)
+            .collect()
+    }
+
+    /// Where an item is got, for any of the items (a chain of materials): the kinds of marker
+    /// (plants, ores, the enemies that drop it, the ley lines for mora and experience), and the
+    /// daily domains with the days they are open and their markers.
+    pub fn where_is(&self, items: &[u32]) -> Where {
+        let file = source_file();
+        let mut found = Where::default();
+        for item in items {
+            for label in self.sources_of(*item) {
+                if !found.labels.contains(&label) {
+                    found.labels.push(label);
+                }
+            }
+            for label in file.mobs.get(item).into_iter().flatten() {
+                if !found.labels.contains(label) && !self.points_of(*label).is_empty() {
+                    found.labels.push(*label);
+                }
+            }
+            // The boss domains: the materials of the weekly bosses.
+            for (point, story) in &file.story {
+                if story.drops.iter().any(|reward| reward.id == *item && *item != 0) && !found.points.contains(point) {
+                    found.points.push(*point);
+                }
+            }
+            for row in file.domains.get(item).into_iter().flatten() {
+                let key = format!("{}{}", row.city, row.kind);
+                if let Some(point) = file.points.get(&key)
+                    && !found.points.contains(point)
+                {
+                    found.points.push(*point);
+                }
+                if !found.domains.iter().any(|known| known.en == row.en) {
+                    found.domains.push(row.clone());
+                }
+            }
+        }
+        found
+    }
+
+    /// Whether a route can be made to get an item: the map has places of it in the open world
+    /// (plants, ores, enemies, the ley lines, a domain marker).  What is crafted or cooked, bought,
+    /// or has no place on the map (flour, the refinement materials ...) can not be.
+    pub fn routable(&self, item: u32) -> bool {
+        let found = self.where_is(&[item]);
+        found.labels.iter().any(|label| !self.points_of(*label).is_empty())
+            || found.points.iter().any(|point| self.points_of(DOMAIN_LABEL).iter().any(|known| known.id == *point))
+    }
+
     /// The groups of kinds of marker.
     pub fn groups(&self) -> impl Iterator<Item = &Label> {
         self.labels.iter().filter(|label| label.parent == 0)
@@ -162,6 +400,14 @@ impl Data {
         for label in &mut labels {
             if label.refresh == 0 && label.parent == ORES {
                 label.refresh = ORE_HOURS;
+            }
+            if label.id == WAVEBINDER && label.en.is_empty() {
+                label.en = "Wavebinder".to_owned();
+                label.ru = "Удерживающий волны".to_owned();
+            }
+            if RESIN_BOSSES.contains(&label.id) {
+                label.resin = true;
+                label.refresh = 0;
             }
         }
         let mut text = String::new();
@@ -496,6 +742,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_wavebinder_is_a_resin_boss_with_a_name() {
+        let data = data();
+        let label = data.label(WAVEBINDER).expect("the kind");
+        assert_eq!(label.en, "Wavebinder");
+        assert!(label.resin && label.refresh == 0);
+        assert!(data.where_is(&[113093]).labels.contains(&WAVEBINDER), "the anchor is dropped by it");
+        assert!(data.routable(113093));
+        // The ordinary enemies keep the time of the map.
+        assert!(!data.label(53).expect("lawachurl").resin);
+    }
+
+    #[test]
+    fn only_what_is_got_in_the_open_world_can_be_routed() {
+        let data = data();
+        assert!(data.routable(112002), "slime condensate: enemies");
+        assert!(data.routable(104304), "a talent book: its domain");
+        assert!(data.routable(113060), "a weekly boss material: its domain");
+        assert!(!data.routable(200103), "a refinement material");
+        assert!(!data.routable(104011), "an enhancement ore");
+        assert!(!data.routable(113063), "a material of the Traveler");
+    }
+
+    #[test]
     fn the_markers_the_program_has_are_there() {
         let data = built_in();
         assert!(data.labels.len() > 500, "{} kinds", data.labels.len());
@@ -545,6 +814,50 @@ mod tests {
         store.collect(points[1].id, 100);
         let counts = store.done_counts(&data, 200);
         assert_eq!(counts.get(&label), Some(&2));
+    }
+}
+
+#[cfg(test)]
+mod sources_tests {
+    use super::*;
+
+    #[test]
+    fn the_domains_of_a_nation_are_told() {
+        // The domain of the talents of Liyue (Taishan Mansion): three domains, each on two days and Sunday.
+        let (talents, city, days) = domain_info(7116).expect("known");
+        assert!(talents && city == 2 && days.len() == 3);
+        assert!(days.iter().all(|day| day.days.contains(&6) && !day.items.is_empty()));
+        assert!(domain_info(1).is_none());
+        // A one-time domain tells the reward of its first completion, a trounce one its drops.
+        let once = story_domain(18667).expect("Moshiri Kara");
+        assert!(once.kind == "once" && once.rewards.iter().any(|reward| reward.en == "Mora" && reward.qty == 30000));
+        let boss = story_domain(81383).expect("Stone Stele Records");
+        assert!(boss.kind == "trounce" && boss.drops.len() == 3 && domain_described(18667));
+        // The domain of the artifacts "Valley of Remembrance" gives these sets.
+        let sets = artifact_domain(7137).expect("known");
+        assert!(sets.iter().any(|set| set.en == "Viridescent Venerer"));
+        assert!(domain_described(7137) && domain_described(7116) && !domain_described(1));
+    }
+
+    #[test]
+    fn where_materials_are_got() {
+        let data = data();
+        assert_eq!(data.sources_of(101003), vec![16], "crystal chunk");
+        assert_eq!(data.sources_of(202), vec![572], "mora: the ley lines");
+        assert_eq!(data.sources_of(104002), vec![572], "books of experience");
+        assert!(!data.sources_of(100022).is_empty(), "a specialty");
+        assert!(data.sources_of(999_999_999).is_empty(), "not known");
+        // Talent books come from a domain (with its days), a core of a chimera from enemies.
+        let book = data.where_is(&[104301]);
+        assert!(!book.points.is_empty() && !book.domains.is_empty(), "{book:?}");
+        assert!(book.domains.iter().all(|domain| !domain.days.is_empty()));
+        assert!(!data.where_is(&[112005]).labels.is_empty(), "damaged mask: hilichurls");
+        // The chimeric cores come from the newest enemies, which only the text of the item names.
+        for item in [112149, 112150, 112151] {
+            assert!(data.where_is(&[item]).labels.contains(&845), "chimeric core {item}");
+        }
+        // Mora and experience never show enemies.
+        assert_eq!(data.where_is(&[202]).labels, vec![572]);
     }
 }
 

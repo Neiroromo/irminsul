@@ -4,7 +4,6 @@
 //! can be shown too, faint.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use egui::{
@@ -89,6 +88,19 @@ struct Filters {
     radar: u32,
     /// The map that was shown (0: the world).
     map: u32,
+    /// The kinds that can be marked as collected; not there: the usual ones.
+    markable: Option<Vec<u32>>,
+}
+
+/// The kinds that can be marked as collected as long as the user has not chosen: what is taken
+/// once and is never there again, but not the waypoints, the statues and the domains, which are
+/// not taken at all.
+fn default_markable(data: &markers::Data) -> BTreeSet<u32> {
+    data.labels
+        .iter()
+        .filter(|label| label.parent != 0 && label.can_be_marked() && data.group_of(label.id) != 1)
+        .map(|label| label.id)
+        .collect()
 }
 
 /// `IRMINSUL_MAP_FILTERS` replaces the file, for trying things out.
@@ -174,6 +186,20 @@ pub struct MapTab {
     overlay: MapOverlay,
     /// The kinds of marker that are shown.
     enabled: BTreeSet<u32>,
+    /// The domains that are shown, if only some are (the others are not shown).
+    only_domains: Option<HashSet<u32>>,
+    /// The kinds of marker that can be marked as collected: what is not here is always shown
+    /// and a click on it does not mark it.
+    markable: BTreeSet<u32>,
+    /// The window where the user chooses them, and what was searched in it.
+    marking_open: bool,
+    marking_search: String,
+    /// The marker of a domain whose description is open.
+    domain_popup: Option<u32>,
+    /// The pictures of the items and artifacts in that description.
+    item_icons: crate::icons::Icons,
+    /// The route mode: what is chosen to farm and the route planned.
+    route: crate::route_ui::RouteState,
     search: String,
     /// What was changed in the filters, to be kept.
     filters_dirty: bool,
@@ -214,12 +240,111 @@ pub struct MapTab {
     plan: Option<((u64, [bool; 5]), Vec<TileKey>)>,
 }
 
+/// Where to look to see these places: a single one is centred and closely zoomed; those that
+/// are all of one region show the region; the rest are shown all together.
+fn view_for(
+    places: &[[f32; 2]],
+    def: &crate::atlas::MapDef,
+    region: &mut String,
+    region_rect: &mut Option<[f32; 4]>,
+    russian: bool,
+) -> Option<[f32; 4]> {
+    let first = places.first()?;
+    if places.len() == 1 {
+        return Some([first[0] - 20., first[1] - 20., first[0] + 20., first[1] + 20.]);
+    }
+    let inside = |anchor: &crate::atlas::Anchor, at: &[f32; 2]| {
+        anchor.rect[0] <= at[0] && at[0] <= anchor.rect[2] && anchor.rect[1] <= at[1] && at[1] <= anchor.rect[3]
+    };
+    let anchors: Vec<&crate::atlas::Anchor> = def.top_anchors().collect();
+    // The regions that have one of the places, the smallest that has all of them first.
+    let common = anchors
+        .iter()
+        .filter(|anchor| places.iter().all(|at| inside(anchor, at)))
+        .min_by(|a, b| {
+            let area = |rect: &[f32; 4]| (rect[2] - rect[0]) * (rect[3] - rect[1]);
+            area(&a.rect).total_cmp(&area(&b.rect))
+        });
+    if let Some(anchor) = common {
+        *region = anchor.name(russian).to_owned();
+        *region_rect = Some(anchor.rect);
+        return Some(anchor.rect);
+    }
+    let mut rect = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    for at in places {
+        rect = [rect[0].min(at[0]), rect[1].min(at[1]), rect[2].max(at[0]), rect[3].max(at[1])];
+    }
+    let pad = ((rect[2] - rect[0]).max(rect[3] - rect[1]) * 0.05).max(30.);
+    Some([rect[0] - pad, rect[1] - pad, rect[2] + pad, rect[3] + pad])
+}
+
+/// The kinds of marker for the statues and the waypoints.
+const TELEPORTS: [u32; 2] = [2, 3];
+
+/// What a list of materials asked to see on the map: where an item is got.
+pub struct ShowRequest {
+    /// The kinds of marker to show.
+    pub labels: Vec<u32>,
+    /// The domains to show (their markers); the other domains are not shown.
+    pub domains: Vec<u32>,
+    /// What to tell over the map (the days of the domains ...).
+    pub note: String,
+}
+
+static SHOW_REQUEST: std::sync::Mutex<Option<ShowRequest>> = std::sync::Mutex::new(None);
+
+/// Asks for the map to be opened where these items are got.
+pub fn request_show(request: ShowRequest, ctx: &Context) {
+    if let Ok(mut slot) = SHOW_REQUEST.lock() {
+        *slot = Some(request);
+    }
+    ctx.request_repaint();
+}
+
+static ROUTE_QUEUE: std::sync::Mutex<Vec<(u32, bool)>> = std::sync::Mutex::new(Vec::new());
+static ROUTE_CHOSEN: std::sync::Mutex<std::collections::BTreeSet<u32>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Asks for items to be added to (or taken off) the route being made on the map.
+pub fn request_route(items: &[u32], add: bool, ctx: &Context) {
+    if let Ok(mut queue) = ROUTE_QUEUE.lock() {
+        queue.extend(items.iter().map(|item| (*item, add)));
+    }
+    if let Ok(mut chosen) = ROUTE_CHOSEN.lock() {
+        for item in items {
+            if add {
+                chosen.insert(*item);
+            } else {
+                chosen.remove(item);
+            }
+        }
+    }
+    ctx.request_repaint();
+}
+
+/// Whether an item is in the route being made.
+pub fn route_has(item: u32) -> bool {
+    ROUTE_CHOSEN.lock().is_ok_and(|chosen| chosen.contains(&item))
+}
+
+/// The items asked to be added or taken off, once.
+pub fn take_route_requests() -> Vec<(u32, bool)> {
+    ROUTE_QUEUE.lock().map(|mut queue| std::mem::take(&mut *queue)).unwrap_or_default()
+}
+
+/// What was asked for, once.
+pub fn take_request() -> Option<ShowRequest> {
+    SHOW_REQUEST.lock().ok().and_then(|mut request| request.take())
+}
+
 impl MapTab {
     pub fn new(ctx: &Context) -> Self {
         let mut tab = Self::made(ctx);
         if let Some(filters) = load_filters() {
             tab.enabled = filters.enabled.into_iter().collect();
             tab.only_closed = filters.only_closed;
+            if let Some(markable) = filters.markable {
+                tab.markable = markable.into_iter().collect();
+            }
             tab.show_faint = filters.show_faint;
             tab.show_explored = filters.show_explored;
             tab.show_range = !filters.hide_range;
@@ -278,6 +403,13 @@ impl MapTab {
             during_game: false,
             overlay: MapOverlay::new(ctx),
             enabled: markers::DEFAULT_SHOWN.into_iter().collect(),
+            only_domains: None,
+            markable: default_markable(&markers::data()),
+            marking_open: false,
+            marking_search: String::new(),
+            domain_popup: None,
+            item_icons: crate::icons::Icons::new(ctx),
+            route: crate::route_ui::RouteState::new(),
             search: String::new(),
             filters_dirty: false,
             markers: Store::default(),
@@ -296,6 +428,63 @@ impl MapTab {
             done_counts: None,
             on_disk: None,
             plan: None,
+        }
+    }
+
+    /// Shows only the given kinds of marker, and the teleports (a request of the materials
+    /// and the planner: where an item is got), on the map of the world.
+    /// Applies what the menus of the materials asked of the route.
+    pub fn route_requests(&mut self, requests: Vec<(u32, bool)>) {
+        if requests.is_empty() {
+            return;
+        }
+        for (item, add) in requests {
+            if add {
+                self.route.items.insert(item);
+            } else {
+                self.route.items.remove(&item);
+            }
+        }
+        self.route.resolve(&markers::data());
+    }
+
+    /// Keeps what the menus of the materials know of the route up to date.
+    pub fn route_mirror(&self) {
+        if let Ok(mut chosen) = ROUTE_CHOSEN.lock() {
+            *chosen = self.route.items.clone();
+        }
+    }
+
+    pub fn show_only(&mut self, request: ShowRequest, russian: bool) {
+        let ShowRequest { labels, domains, note } = request;
+        let data = markers::data();
+        if self.map != WORLD {
+            self.switch_map(WORLD, &data);
+        }
+        self.level = 0;
+        self.search.clear();
+        self.enabled = labels.iter().copied().chain(TELEPORTS).collect();
+        if !domains.is_empty() {
+            self.enabled.insert(markers::DOMAIN_LABEL);
+        }
+        self.only_domains = (!domains.is_empty()).then(|| domains.iter().copied().collect());
+        // The view: a single marker is centred and zoomed to the most; markers of one region
+        // show that region; markers of several regions are all in view.
+        let mut places: Vec<[f32; 2]> = Vec::new();
+        for label in &labels {
+            places.extend(data.points_in(*label, WORLD, 0).map(|point| [point.x, point.y]));
+        }
+        if !domains.is_empty() {
+            places.extend(
+                data.points_in(markers::DOMAIN_LABEL, WORLD, 0)
+                    .filter(|point| domains.contains(&point.id))
+                    .map(|point| [point.x, point.y]),
+            );
+        }
+        self.pending_view = data.atlas.map(WORLD).and_then(|def| view_for(&places, def, &mut self.region, &mut self.region_rect, russian));
+        self.placed = true;
+        if !note.is_empty() {
+            self.notice = Some((note, std::time::Instant::now()));
         }
     }
 
@@ -604,13 +793,14 @@ impl MapTab {
         self.markers.use_account(snapshot.uid);
         self.apply_chest_marks(marks);
         // What is chosen on the map here is on the map over the game too.
-        let mut version = self.markers.version ^ u64::from(self.only_closed) ^ (u64::from(self.show_faint) << 1);
+        let mut version = self.markers.version ^ u64::from(self.only_closed) ^ (u64::from(self.show_faint) << 1) ^ (self.markable.len() as u64) << 20;
         version ^= u64::from(self.show_range) << 2;
         for label in &self.enabled {
             version = version.rotate_left(5) ^ u64::from(*label);
         }
         let shown = crate::map_overlay::SharedMarkers {
             enabled: &self.enabled,
+            markable: &self.markable,
             store: &self.markers,
             hide_done: self.only_closed,
             show_faint: self.show_faint,
@@ -652,6 +842,7 @@ impl MapTab {
                 language_choice(ui, language);
                 self.settings_button(ui, russian);
                 self.locate_button(ui, player, russian);
+                self.route_button(ui, russian);
                 let progress = self.tiles.progress();
                 if progress.running.load(Ordering::Relaxed) {
                     ui.label(
@@ -672,6 +863,8 @@ impl MapTab {
 
         // The filters on the left, as on the official map, and the map on the right.
         let mut fit_now = false;
+        let mut route_action = crate::route_ui::Action::None;
+        self.route.poll();
         egui::SidePanel::left("map_filters")
             .resizable(true)
             .default_width(330.)
@@ -686,7 +879,13 @@ impl MapTab {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        fit_now = self.filters_ui(ui, snapshot, russian);
+                        if self.route.active {
+                            self.item_icons.poll();
+                            let data = markers::data();
+                            route_action = self.route.panel(ui, &self.item_icons, &data, data.atlas.map(self.map), self.map, russian);
+                        } else {
+                            fit_now = self.filters_ui(ui, snapshot, russian);
+                        }
                     });
             });
         egui::CentralPanel::default()
@@ -694,7 +893,10 @@ impl MapTab {
             .show_inside(ui, |ui| {
                 self.map_ui(ui, snapshot, player, russian, fit_now);
             });
+        self.route_action(ui.ctx(), route_action, player, russian);
         self.settings_window(ui.ctx(), snapshot, russian);
+        self.marking_window(ui.ctx(), russian);
+        self.domain_window(ui.ctx(), russian);
         self.markers.save();
         if self.filters_dirty {
             self.filters_dirty = false;
@@ -717,6 +919,7 @@ impl MapTab {
             hide_range: !self.show_range,
             radar: self.radar,
             map: self.map,
+            markable: Some(self.markable.iter().copied().collect()),
         };
         if let Ok(bytes) = serde_json::to_vec(&filters) {
             let _ = std::fs::write(path, bytes);
@@ -751,11 +954,23 @@ impl MapTab {
             if ui.button(tr("Chests found", "Найденные сундуки")).clicked() {
                 fit_now = true;
             }
+            if ui
+                .button(tr("Marks", "Отметки"))
+                .on_hover_text(tr(
+                    "Choose which kinds of marker can be marked as collected",
+                    "Выбрать, какие метки можно отмечать собранными",
+                ))
+                .clicked()
+            {
+                self.marking_open = !self.marking_open;
+            }
             if ui.button(tr("Hide all", "Скрыть всё")).clicked() {
+                self.only_domains = None;
                 self.enabled.clear();
                 changed = true;
             }
             if ui.button(tr("Defaults", "По умолчанию")).clicked() {
+                self.only_domains = None;
                 self.enabled = markers::DEFAULT_SHOWN.into_iter().collect();
                 changed = true;
             }
@@ -869,7 +1084,7 @@ impl MapTab {
                         let done = if tracked && markers::CHEST_LABELS.contains(&label.id) {
                             snapshot.chests.iter().filter(|chest| chest.tier() == chest_tier(label.id) && chest.opened_at.is_some()).count()
                         } else {
-                            done_counts.get(&label.id).copied().unwrap_or(0)
+                            done_counts.get(&label.id).copied().filter(|_| self.markable.contains(&label.id)).unwrap_or(0)
                         };
                         let count = if done > 0 { format!("{done}/{total}") } else { total.to_string() };
                         let texture = self.icons.get(label.id, &label.icon);
@@ -883,7 +1098,12 @@ impl MapTab {
                             label.name(russian),
                             &count,
                         );
-                        let response = if label.refresh > 0 {
+                        let response = if label.resin {
+                            response.on_hover_text(tr(
+                                "A boss fought for resin: it is there again at once, as long as there is resin",
+                                "Босс за смолу: появляется снова сразу, пока хватает смолы",
+                            ))
+                        } else if label.refresh > 0 {
                             response.on_hover_text(format!(
                                 "{}: {} {}",
                                 tr("Comes back after", "Возвращается через"),
@@ -1125,7 +1345,21 @@ impl MapTab {
         // The markers of the kinds that are chosen (the chests are below).
         let now = markers::unix_now();
         let dots = self.scale < 0.07;
-        for &label_id in &self.enabled {
+        // In the route mode only what is chosen to farm (and the teleports) is shown.
+        let route_on = self.route.active;
+        let enabled: BTreeSet<u32> = if route_on {
+            let mut set = self.route.labels.clone();
+            if self.route.teleports {
+                set.extend(TELEPORTS);
+            }
+            if !self.route.domains.is_empty() {
+                set.insert(markers::DOMAIN_LABEL);
+            }
+            set
+        } else {
+            self.enabled.clone()
+        };
+        for &label_id in &enabled {
             // The chests of the surface of the world are drawn below, as they are
             // followed; all others are markers like the rest.
             if tracked && markers::CHEST_LABELS.contains(&label_id) {
@@ -1134,7 +1368,16 @@ impl MapTab {
             let Some(label) = data.label(label_id) else {
                 continue;
             };
-            let mut points = data.points_on(label_id, self.map, &self.shown_floors).peekable();
+            let only_domains = if route_on {
+                (!self.route.labels.contains(&markers::DOMAIN_LABEL)).then(|| self.route.domains.clone())
+            } else {
+                self.only_domains.clone()
+            }
+            .filter(|_| label_id == markers::DOMAIN_LABEL);
+            let mut points = data
+                .points_on(label_id, self.map, &self.shown_floors)
+                .filter(|point| only_domains.as_ref().is_none_or(|set| set.contains(&point.id)))
+                .peekable();
             if points.peek().is_none() {
                 continue;
             }
@@ -1147,7 +1390,12 @@ impl MapTab {
                 if !on_screen.contains(at) {
                     continue;
                 }
-                let state = self.markers.state(point.id, label.refresh, now);
+                // What can not be marked is always as it is: never done, never hidden.
+                let state = if self.markable.contains(&label_id) {
+                    self.markers.state(point.id, label.refresh, now)
+                } else {
+                    MarkerState::Available
+                };
                 let done = matches!(state, MarkerState::Done { .. });
                 if done && self.only_closed {
                     continue;
@@ -1189,7 +1437,7 @@ impl MapTab {
 
         // The chests of the official map that are not found: faint, below; or,
         // if the place was walked by, most likely opened.
-        if let Some(matched) = self.matched.as_ref().filter(|_| tracked) {
+        if let Some(matched) = self.matched.as_ref().filter(|_| tracked && !self.route.active) {
             let dots = self.scale < DOT_SCALE;
             for (index, chest) in official_chests::all().iter().enumerate() {
                 if matched.found[index] || !self.tier_shown(chest.tier) {
@@ -1219,7 +1467,7 @@ impl MapTab {
         // The chests found.  The opened ones below, so the ones to go to are
         // not hidden by them.
         let mut found: Vec<(&Chest, Pos2, Look)> = Vec::new();
-        for (index, chest) in snapshot.chests.iter().enumerate().take(if tracked { usize::MAX } else { 0 }) {
+        for (index, chest) in snapshot.chests.iter().enumerate().take(if tracked && !self.route.active { usize::MAX } else { 0 }) {
             let Some(position) = chest.position else {
                 continue;
             };
@@ -1245,6 +1493,9 @@ impl MapTab {
             draw_chest(&painter, *at, chest.tier(), *look, 1.);
             hoverable.push((*at, Hover::Found(chest, *look)));
         }
+
+        // The route, over the markers.
+        crate::route_ui::draw(&self.route, &painter, area, &to_screen, origin, &self.shown_floors, self.map);
 
         // The buttons of the levels.
         let pointer_now = ui.ctx().input(|i| i.pointer.hover_pos());
@@ -1319,24 +1570,28 @@ impl MapTab {
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
             if let Some((_, what)) = nearest {
+                // Shift and a click on a marker: the player stands by it.
+                let shift = ui.input(|input| input.modifiers.shift);
                 if response.clicked()
-                    && let Hover::Marker(point, label, _) = what
-                {
-                    // Only what is taken once can be marked; a mark that is on can be taken off.
-                    if label.can_be_marked() || self.markers.is_collected(point.id) {
-                        clicked_marker = Some(point.id);
-                    } else {
-                        refused = Some(tr(
-                            "This comes back after a while: it can not be marked as collected yet.",
-                            "Это снова появляется со временем: отметить собранным пока нельзя.",
-                        ).to_owned());
-                    }
-                }
-                // A right click on a marker: the player stands by it.
-                if response.secondary_clicked()
+                    && shift
                     && let Hover::Marker(point, ..) = what
                 {
                     stood_by = Some(*point);
+                } else if response.clicked()
+                    && let Hover::Marker(point, label, _) = what
+                {
+                    // A domain tells what it gives; of the others only the kinds the user
+                    // chose (see "Marks") are marked.
+                    if markers::domain_described(point.id) {
+                        self.domain_popup = Some(point.id);
+                    } else if self.markable.contains(&label.id) {
+                        clicked_marker = Some(point.id);
+                    } else {
+                        refused = Some(tr(
+                            "Marking of this kind is off: turn it on with the button \"Marks\" in the filters.",
+                            "Отметка этого вида выключена: включите её в фильтрах, кнопка «Отметки».",
+                        ).to_owned());
+                    }
                 }
                 response.on_hover_ui_at_pointer(|ui| match what {
                     Hover::Found(chest, look) => chest_tooltip(ui, chest, *look, russian),
@@ -1355,13 +1610,10 @@ impl MapTab {
                         ui.label(RichText::new(label.name(russian)).strong().size(15.));
                         match state {
                             MarkerState::Available => {
-                                if label.can_be_marked() {
+                                if markers::domain_described(point.id) {
+                                    ui.label(tr("Click: what it gives and when.", "Клик: что здесь фармить и когда."));
+                                } else if self.markable.contains(&label.id) {
                                     ui.label(tr("Not collected. Click to mark it.", "Не собрано. Клик — отметить."));
-                                } else {
-                                    ui.label(tr(
-                                        "Not collected. It comes back, so it can not be marked yet.",
-                                        "Не собрано. Появляется снова, поэтому отметить пока нельзя.",
-                                    ));
                                 }
                             }
                             MarkerState::Done { at, back } => {
@@ -1378,8 +1630,8 @@ impl MapTab {
                         if player.is_some_and(|player| player.scene != 3) {
                             ui.label(
                                 RichText::new(tr(
-                                    "Right click: I am standing here (sets where this place lies on the map)",
-                                    "Правый клик: я стою здесь (задаёт, где это место лежит на карте)",
+                                    "Shift + click: I am standing here (sets where this place lies on the map)",
+                                    "Shift + клик: я стою здесь (задаёт, где это место лежит на карте)",
                                 ))
                                 .size(12.)
                                 .color(DIM),
@@ -1498,6 +1750,59 @@ impl MapTab {
 
     /// The button of the map's settings, and what opens under it: fetching the
     /// tiles of the map in the background.
+    /// The button that switches the route mode on and off.
+    fn route_button(&mut self, ui: &mut Ui, russian: bool) {
+        let tr = |en: &'static str, ru: &'static str| if russian { ru } else { en };
+        let button = ui
+            .add(egui::Button::new(RichText::new(format!("{} {}", egui_material_icons::icons::ICON_ROUTE, tr("Route", "Маршрут"))).size(15.)).selected(self.route.active))
+            .on_hover_text(tr("Plan a route over the places to farm", "Построить маршрут по местам фарма"));
+        if button.clicked() {
+            self.route.active = !self.route.active;
+            if self.route.active {
+                self.route.resolve(&markers::data());
+            }
+        }
+    }
+
+    /// Does what the route panel asked.
+    fn route_action(&mut self, ctx: &Context, action: crate::route_ui::Action, player: Option<crate::PlayerPlace>, russian: bool) {
+        use crate::route_ui::Action;
+        let tr = |en: &'static str, ru: &'static str| if russian { ru } else { en };
+        match action {
+            Action::None => {}
+            Action::Focus(rect) => {
+                self.pending_view = Some(rect);
+            }
+            Action::Generate => {
+                let data = markers::data();
+                self.route.resolve(&data);
+                let now = markers::unix_now();
+                let stops = crate::route_ui::targets(&self.route, &data, self.map, &|point, label| {
+                    self.markable.contains(&label.id) && matches!(self.markers.state(point.id, label.refresh, now), MarkerState::Done { .. })
+                });
+                if stops.is_empty() {
+                    self.route.message = tr("There is nothing to visit on this map for this choice.", "На этой карте для такого выбора нет точек.").to_owned();
+                    return;
+                }
+                if stops.len() > crate::route::MAX_STOPS {
+                    self.route.message = format!(
+                        "{} {} ({} {})",
+                        tr("Too many places:", "Слишком много точек:"),
+                        stops.len(),
+                        tr("at most", "не больше"),
+                        crate::route::MAX_STOPS
+                    );
+                    return;
+                }
+                let waypoints = if self.route.teleports { crate::route_ui::waypoints(&data, self.map, &TELEPORTS) } else { Vec::new() };
+                let start = player
+                    .filter(|player| player.map != 0 && player.map == self.map)
+                    .map(|player| crate::route::Spot { id: 0, label: 0, at: player.at, floor: player.floor as u16 });
+                self.route.start(ctx, self.map, stops, waypoints, start);
+            }
+        }
+    }
+
     fn settings_button(&mut self, ui: &mut Ui, russian: bool) {
         let tr = |en: &'static str, ru: &'static str| if russian { ru } else { en };
         let button = ui.button(
@@ -1593,6 +1898,241 @@ impl MapTab {
     /// The settings of the map, in a window of their own: as wide as the app's
     /// window lets, in as many columns as fit, and what is taller than the window
     /// scrolls, so that it is always all in it.
+    /// The window where the user chooses which kinds of marker can be marked as collected.
+    fn marking_window(&mut self, ctx: &Context, russian: bool) {
+        if !self.marking_open {
+            return;
+        }
+        let tr = |en: &'static str, ru: &'static str| if russian { ru } else { en };
+        let data = markers::data();
+        let mut changed = false;
+        let modal = egui::Modal::new(egui::Id::new("marking_window")).show(ctx, |ui| {
+            ui.set_width(400.);
+            ui.label(RichText::new(tr("What can be marked", "Что можно отмечать")).size(20.).strong());
+            ui.label(
+                RichText::new(tr(
+                    "A marked kind gets a click that marks a marker as collected (it is greyed out, or hidden with \"Only not collected\"). The others are always shown. Only what is not coming back is here.",
+                    "Для выбранного вида клик по метке отмечает её собранной (она тускнеет или скрывается при «Только несобранные»). Остальные всегда показаны. Здесь только то, что не появляется снова.",
+                ))
+                .size(12.)
+                .color(DIM),
+            );
+            ui.add_space(4.);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.marking_search)
+                    .hint_text(tr("Search", "Поиск"))
+                    .desired_width(ui.available_width()),
+            );
+            ui.horizontal(|ui| {
+                if ui.button(tr("Defaults", "По умолчанию")).clicked() {
+                    self.markable = default_markable(&data);
+                    changed = true;
+                }
+                if ui.button(tr("None", "Ни одной")).clicked() {
+                    self.markable.clear();
+                    changed = true;
+                }
+            });
+            let needle = self.marking_search.trim().to_lowercase();
+            egui::ScrollArea::vertical().max_height(420.).auto_shrink([false, true]).show(ui, |ui| {
+                for group in data.groups() {
+                    let kinds: Vec<&markers::Label> = data
+                        .children(group.id)
+                        .filter(|label| label.refresh == 0 && !label.resin && data.points_of(label.id).iter().next().is_some())
+                        .filter(|label| needle.is_empty() || label.en.to_lowercase().contains(&needle) || label.ru.to_lowercase().contains(&needle))
+                        .collect();
+                    if kinds.is_empty() {
+                        continue;
+                    }
+                    let on = kinds.iter().filter(|label| self.markable.contains(&label.id)).count();
+                    let mut header = egui::CollapsingHeader::new(RichText::new(format!("{}  ({on}/{})", group.name(russian), kinds.len())).strong())
+                        .id_salt(("marking_group", group.id));
+                    if !needle.is_empty() {
+                        header = header.open(Some(true));
+                    }
+                    header.show(ui, |ui| {
+                        for label in kinds {
+                            let mut marked = self.markable.contains(&label.id);
+                            if ui.checkbox(&mut marked, label.name(russian)).changed() {
+                                if marked {
+                                    self.markable.insert(label.id);
+                                } else {
+                                    self.markable.remove(&label.id);
+                                }
+                                changed = true;
+                            }
+                        }
+                    });
+                }
+            });
+        });
+        if changed {
+            self.done_counts = None;
+            self.save_filters();
+        }
+        if modal.should_close() {
+            self.marking_open = false;
+        }
+    }
+
+    /// The description of a domain, opened by a click on it: what it gives (as pictures) and on
+    /// which days.  Closed by Escape or by a press outside the window, like every popup.
+    fn domain_window(&mut self, ctx: &Context, russian: bool) {
+        let Some(point) = self.domain_popup else {
+            return;
+        };
+        let artifacts = markers::artifact_domain(point);
+        let daily = markers::domain_info(point);
+        let story = markers::story_domain(point);
+        if artifacts.is_none() && daily.is_none() && story.is_none() {
+            self.domain_popup = None;
+            return;
+        }
+        let tr = |en: &'static str, ru: &'static str| if russian { ru } else { en };
+        const RU: [&str; 7] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+        const EN: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+        let names = if russian { RU } else { EN };
+        let today = markers::game_weekday();
+        let upgrade = crate::upgrade_store::data();
+        let live = crate::live_data::current();
+        self.item_icons.poll();
+        let icons = &self.item_icons;
+        let green = Color32::from_rgb(0x4a, 0xde, 0x80);
+        let modal = egui::Modal::new(egui::Id::new("domain_window")).show(ctx, |ui| {
+            ui.set_width(460.);
+            if let Some(story) = story {
+                let trounce = story.kind == "trounce";
+                ui.label(
+                    RichText::new(if trounce {
+                        tr("Trounce domain (weekly boss)", "Подземелье наказания (недельный босс)")
+                    } else {
+                        tr("One-time domain", "Разовое подземелье")
+                    })
+                    .size(20.)
+                    .strong(),
+                );
+                ui.label(RichText::new(if russian { &story.ru } else { &story.en }).size(15.).strong());
+                if trounce {
+                    if !story.boss.is_empty() {
+                        ui.label(RichText::new(&story.boss).size(13.).color(DIM));
+                    }
+                    ui.add_space(4.);
+                    ui.label(
+                        RichText::new(tr(
+                            "Once a week for resin: the materials below, a gem and a billet. First clear: one of each character level-up material.",
+                            "Раз в неделю за смолу: материалы ниже, самоцвет и заготовка. За первое прохождение: по одному материалу возвышения персонажа каждого вида.",
+                        ))
+                        .size(12.)
+                        .color(DIM),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new(tr(
+                            "Rewards of the first completion only; later it gives nothing.",
+                            "Награда только за первое прохождение; дальше ничего не даёт.",
+                        ))
+                        .size(12.)
+                        .color(DIM),
+                    );
+                }
+                ui.add_space(6.);
+                let list = if trounce { &story.drops } else { &story.rewards };
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(6., 6.);
+                    for reward in list {
+                        let cell = crate::roster_tab::Cell {
+                            icon: &reward.icon,
+                            rarity: reward.rank.max(1),
+                            stars: false,
+                            label: (reward.qty > 1).then(|| (reward.qty.to_string(), Color32::WHITE)),
+                            selected: false,
+                        };
+                        crate::roster_tab::item_cell(ui, icons, 52., &cell)
+                            .on_hover_text(if russian { &reward.ru } else { &reward.en });
+                    }
+                });
+                if list.is_empty() {
+                    ui.label(RichText::new(tr("No data on the rewards.", "Нет данных о наградах.")).color(DIM));
+                }
+                ui.add_space(6.);
+            }
+            if let Some(sets) = artifacts {
+                ui.label(RichText::new(tr("Artifact domain", "Подземелье артефактов")).size(20.).strong());
+                ui.label(RichText::new(tr("Artifact sets it gives:", "Какие наборы артефактов здесь выпадают:")).size(12.).color(DIM));
+                ui.add_space(6.);
+                for set in sets {
+                    ui.horizontal(|ui| {
+                        let cell = crate::roster_tab::Cell { icon: &set.icon, rarity: 5, stars: false, label: None, selected: false };
+                        crate::roster_tab::item_cell(ui, icons, 52., &cell);
+                        ui.label(RichText::new(if russian { &set.ru } else { &set.en }).size(15.).strong());
+                    });
+                }
+            }
+            if let Some((talents, city, days)) = &daily {
+                let nation = match city {
+                    1 => tr("Mondstadt", "Мондштадт"),
+                    2 => tr("Liyue", "Ли Юэ"),
+                    3 => tr("Inazuma", "Инадзума"),
+                    4 => tr("Sumeru", "Сумеру"),
+                    5 => tr("Fontaine", "Фонтейн"),
+                    6 => tr("Natlan", "Натлан"),
+                    7 => tr("Nod-Krai", "Нод-Край"),
+                    _ => tr("Snezhnaya", "Снежная"),
+                };
+                ui.label(
+                    RichText::new(if *talents {
+                        tr("Domain of talent books", "Подземелье книг талантов")
+                    } else {
+                        tr("Domain of weapon materials", "Подземелье материалов оружия")
+                    })
+                    .size(20.)
+                    .strong(),
+                );
+                ui.label(RichText::new(nation).size(15.));
+                ui.label(
+                    RichText::new(tr(
+                        "Which material is got changes with the day of the week (the day changes at 4:00); on Sunday all of them are open.",
+                        "Какой материал падает, зависит от дня недели (день меняется в 4:00); в воскресенье открыты все.",
+                    ))
+                    .size(12.)
+                    .color(DIM),
+                );
+                ui.add_space(6.);
+                for day in days {
+                    let open_today = day.days.contains(&today);
+                    let list = day.days.iter().filter_map(|d| names.get(*d as usize)).copied().collect::<Vec<_>>().join(", ");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(list).strong().color(if open_today { green } else { DIM }));
+                        ui.label(RichText::new(if russian { &day.ru } else { &day.en }).strong());
+                        if open_today {
+                            ui.label(RichText::new(tr("(today)", "(сегодня)")).color(green));
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(6., 6.);
+                        for id in &day.items {
+                            let Some(material) = upgrade.materials.get(id).or_else(|| live.materials.get(id)) else {
+                                continue;
+                            };
+                            let cell = crate::roster_tab::Cell {
+                                icon: &material.icon,
+                                rarity: material.rarity.max(1),
+                                stars: false,
+                                label: None,
+                                selected: false,
+                            };
+                            crate::roster_tab::item_cell(ui, icons, 52., &cell).on_hover_text(material.name.get(russian));
+                        }
+                    });
+                    ui.add_space(6.);
+                }
+            }
+        });
+        if modal.should_close() {
+            self.domain_popup = None;
+        }
+    }
+
     fn settings_window(&mut self, ctx: &Context, snapshot: &Snapshot, russian: bool) {
         if !self.settings_open {
             return;
@@ -1610,14 +2150,9 @@ impl MapTab {
             2 => vec![vec![0], vec![1, 2]],
             _ => vec![vec![0, 1, 2]],
         };
-        let mut open = self.settings_open;
-        egui::Window::new(tr("Map settings", "Настройки карты"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::RIGHT_TOP, vec2(-12., 96.))
-            .constrain(true)
-            .show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::new("map_settings_modal")).show(ctx, |ui| {
+                ui.label(RichText::new(tr("Map settings", "Настройки карты")).size(20.).strong());
+                ui.add_space(4.);
                 egui::ScrollArea::vertical()
                     .max_height((screen.height() - 190.).max(240.))
                     .auto_shrink([true, true])
@@ -1645,8 +2180,8 @@ impl MapTab {
                                                             "Сбросить ручную привязку этого места",
                                                         ))
                                                         .on_hover_text(tr(
-                                                            "Right clicks on markers say where the player stands; this takes them back.",
-                                                            "Правые клики по меткам говорят, где стоит игрок; это их отменяет.",
+                                                            "Shift + clicks on markers say where the player stands; this takes them back.",
+                                                            "Shift + клики по меткам говорят, где стоит игрок; это их отменяет.",
                                                         ))
                                                         .clicked()
                                                 {
@@ -1661,7 +2196,9 @@ impl MapTab {
                         });
                     });
             });
-        self.settings_open = open;
+        if modal.should_close() {
+            self.settings_open = false;
+        }
     }
 
     fn settings_ui(&mut self, ui: &mut Ui, snapshot: &Snapshot, russian: bool) {
