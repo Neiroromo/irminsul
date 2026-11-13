@@ -262,6 +262,11 @@ fn map_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
+/// Where the tiles of a version of a map are kept.
+pub fn version_dir(version: &str) -> Option<PathBuf> {
+    map_dir().map(|dir| dir.join(version))
+}
+
 #[derive(Default)]
 struct State {
     /// The tiles as pictures in memory, for drawing the map by the program

@@ -48,8 +48,12 @@ mod minimap;
 mod marker_icons;
 mod markers;
 mod map_render;
+mod game_map;
+mod game_map_panel;
+mod map_sync;
 mod map_tab;
 mod route;
+mod session_log;
 mod route_ui;
 mod map_tiles;
 mod official_chests;
@@ -57,6 +61,7 @@ mod overlay;
 mod overlay_window;
 mod planner_tab;
 mod probe;
+mod mob_watch;
 mod monitor;
 mod player_data;
 mod profiles;
@@ -197,6 +202,8 @@ pub struct AppState {
     chests: std::sync::Arc<chests::Snapshot>,
     /// What state the chests of the markers of the other maps are in, in the game.
     chest_marks: std::sync::Arc<chest_watch::ChestMarks>,
+    /// The monsters alive around the player, as the game sent them.
+    mobs: std::sync::Arc<mob_watch::MobsSeen>,
     /// Where the player is, if the game has said.
     player: Option<PlayerPlace>,
     updated: DataUpdated,
@@ -216,6 +223,7 @@ impl AppState {
             roster: Default::default(),
             chests: Default::default(),
             chest_marks: Default::default(),
+            mobs: Default::default(),
             player: None,
             updated: DataUpdated::new(),
         }
@@ -283,9 +291,14 @@ impl TracingLevel {
 
 struct ReloadHandle(reload::Handle<EnvFilter, tracing_subscriber::Registry>);
 
+/// The lines of the debug timeline go to the background log only.
+fn usual_filter(filter: &str) -> String {
+    format!("{filter},{}=off", session_log::TIMELINE)
+}
+
 impl ReloadHandle {
     pub fn set_filter(&mut self, filter: &str) {
-        if let Err(e) = self.0.reload(filter) {
+        if let Err(e) = self.0.reload(usual_filter(filter)) {
             tracing::warn!("Failed to set tracing filter to \"{filter}\": {e}");
         }
         tracing::info!("Set tracing filter to \"{filter}\"");
@@ -330,6 +343,10 @@ fn main() -> eframe::Result {
         admin::ensure_admin();
     }
 
+    // After the rights are there: the program that asks for them ends at once.
+    session_log::start();
+    tracing::info!("Irminsul {} started", env!("CARGO_PKG_VERSION"));
+
     let capture_backend = args.capture_backend;
     let minimized = args.minimized;
     let preview_popup = args.preview_popup;
@@ -362,7 +379,7 @@ fn main() -> eframe::Result {
         persist_window: false,
         ..Default::default()
     };
-    eframe::run_native(
+    let result = eframe::run_native(
         "Irminsul",
         native_options,
         Box::new(move |cc| {
@@ -374,7 +391,9 @@ fn main() -> eframe::Result {
                 preview_popup,
             )))
         }),
-    )
+    );
+    session_log::finish();
+    result
 }
 
 fn log_dir() -> Result<PathBuf> {
@@ -398,14 +417,21 @@ fn tracing_init() -> Result<(tracing_appender::non_blocking::WorkerGuard, Reload
         .build(log_dir()?)?;
     let (non_blocking_appender, guard) = tracing_appender::non_blocking(appender);
 
-    let filter = EnvFilter::new(TracingLevel::default().get_filter());
+    let filter = EnvFilter::new(usual_filter(TracingLevel::default().get_filter()));
     let (filter, reload_handle) = reload::Layer::new(filter);
     let writer = tracing_subscriber::fmt::layer()
         .with_writer(non_blocking_appender)
-        .with_ansi(false);
+        .with_ansi(false)
+        .with_filter(filter);
+    // The background log of the run takes more, whatever level is chosen (see `session_log`).
+    let background = tracing_subscriber::fmt::layer()
+        .with_writer(session_log::Writer)
+        .with_ansi(false)
+        .with_timer(tracing_subscriber::fmt::time::ChronoLocal::new("%Y-%m-%d %H:%M:%S%.3f".to_owned()))
+        .with_filter(EnvFilter::new(session_log::FILTER));
     tracing_subscriber::registry()
-        .with(filter)
         .with(writer)
+        .with(background)
         .init();
     tracing::info!("Tracing initialized and logging to file.");
 

@@ -151,6 +151,8 @@ pub struct IrminsulApp {
     toasts: Toasts,
 
     power_tools_open: bool,
+    /// What to write with the mark of the background log.
+    background_log_note: String,
 
     capture_settings_open: bool,
 
@@ -339,6 +341,7 @@ impl IrminsulApp {
             tracing_reload_handle,
             toasts,
             power_tools_open: false,
+            background_log_note: String::new(),
             capture_settings_open: false,
             optimizer_settings_open: false,
             optimizer_export_rx: None,
@@ -589,9 +592,9 @@ impl eframe::App for IrminsulApp {
             self.saved_state.achievement_progress.language,
         );
         {
-            let (chests, marks, player) = {
+            let (chests, marks, player, key_lost, mobs) = {
                 let state = self.state_rx.borrow();
-                (state.chests.clone(), state.chest_marks.clone(), state.player)
+                (state.chests.clone(), state.chest_marks.clone(), state.player, state.capture_progress.failed, state.mobs.clone())
             };
             self.map_tab.overlay_frame(
                 ctx,
@@ -599,6 +602,8 @@ impl eframe::App for IrminsulApp {
                 &marks,
                 player,
                 self.saved_state.achievement_progress.language,
+                key_lost,
+                &mobs,
             );
         }
         let changes = self.state_rx.borrow().changes.clone();
@@ -1422,6 +1427,8 @@ impl IrminsulApp {
         }
         ui.end_row();
         ui.separator();
+        self.background_log_ui(ui);
+        ui.separator();
         self.debug_timeline_ui(ui);
         ui.separator();
         egui::Sides::new().show(
@@ -1433,6 +1440,52 @@ impl IrminsulApp {
                 }
             },
         );
+    }
+
+    /// The background log of the run: whether it is written, and the button that keeps it.
+    fn background_log_ui(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Background log").size(16.));
+        ui.label(
+            RichText::new(
+                "Everything the program says is written to a log of this run, and thrown away \
+                 when the program closes. Press the button when something went wrong: the log \
+                 is then kept, with a mark at that moment.",
+            )
+            .size(12.),
+        );
+        let mut on = crate::session_log::enabled();
+        if ui
+            .checkbox(&mut on, "Write the background log from the start of the program")
+            .on_hover_text("Holds from the next start of the program")
+            .changed()
+        {
+            crate::session_log::set_enabled(on);
+        }
+        match crate::session_log::status() {
+            Some((path, kept)) => {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.background_log_note)
+                            .hint_text("What went wrong (optional)")
+                            .desired_width(260.),
+                    );
+                    if ui.button("Keep this log (mark a problem)").clicked() {
+                        let note = self.background_log_note.trim();
+                        crate::session_log::keep(if note.is_empty() { "marked by the user" } else { note });
+                        self.background_log_note.clear();
+                    }
+                });
+                let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                if kept {
+                    ui.label(RichText::new(format!("{name}: marked, it will be kept")).color(Color32::from_rgb(0x8b, 0xd4, 0x6e)));
+                } else {
+                    ui.label(RichText::new(format!("{name}: not marked, it will be removed when the program closes")).size(12.));
+                }
+            }
+            None => {
+                ui.label(RichText::new("No background log is being written in this run.").size(12.));
+            }
+        }
     }
 
     /// Markers for the debug timeline, and the latest lines of it.

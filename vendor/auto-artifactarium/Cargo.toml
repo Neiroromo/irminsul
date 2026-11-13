@@ -16,6 +16,12 @@ tracing = "0.1"
 rsa = "0.9"
 clap = { version = "4.5.47", features = ["derive"] }
 anyhow = "1.0.99"
+flate2 = "1.1"
+ruzstd = "0.8"
+lz4_flex = "0.11"
+brotli-decompressor = "5"
+snap = "1"
+lzma-rs = "0.3"
 
 [build-dependencies]
 protobuf-codegen = "3.7.1"

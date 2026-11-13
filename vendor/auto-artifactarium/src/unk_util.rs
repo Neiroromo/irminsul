@@ -481,6 +481,93 @@ fn scene_gadget(bytes: &[u8]) -> Option<SceneGadget> {
     })
 }
 
+/// Monsters (enemies and animals) are entities too, with ids that begin with these, and their
+/// kinds are numbers of eight digits that begin with a 2.
+const MONSTER_ENTITY_IDS: std::ops::Range<u64> = 0x1000_0000..0x1800_0000;
+const MONSTER_IDS: std::ops::Range<u64> = 20_000_000..30_000_000;
+
+/// A monster that came into view: which kind it is, which one it is in the game's own scripts
+/// (the group and the id in it stay the same for a monster, the id of the entity does not: it
+/// is another each time the monster is sent), and where.  One that was killed is not sent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SceneMonster {
+    pub entity_id: u32,
+    pub monster_id: u32,
+    pub group_id: u32,
+    pub config_id: u32,
+    pub position: Option<[f32; 3]>,
+}
+
+fn scene_monster(bytes: &[u8]) -> Option<SceneMonster> {
+    let entity = Unk::parse_from_bytes(bytes).ok()?;
+    let mut entity_id = None;
+    let mut parts: Vec<Vec<u8>> = Vec::new();
+    for (_, value) in entity.unknown_fields().iter() {
+        match value {
+            Varint(v) if MONSTER_ENTITY_IDS.contains(&v) && entity_id.is_none() => entity_id = Some(v),
+            LengthDelimited(part) => parts.push(part.to_vec()),
+            _ => (),
+        }
+    }
+    let entity_id = entity_id?;
+    let mut found = None;
+    let mut position = None;
+    for part in &parts {
+        let Ok(message) = Unk::parse_from_bytes(part) else {
+            continue;
+        };
+        let mut monster = None;
+        let mut group = None;
+        let mut numbers: Vec<(u32, u64)> = Vec::new();
+        let mut places: Vec<Vec<u8>> = Vec::new();
+        for (field, value) in message.unknown_fields().iter() {
+            match value {
+                Varint(v) if field == 1 && MONSTER_IDS.contains(&v) && monster.is_none() => monster = Some(v),
+                Varint(v) if GROUP_IDS.contains(&v) && group.is_none() => group = Some((field, v)),
+                Varint(v) => numbers.push((field, v)),
+                LengthDelimited(bytes) => places.push(bytes.to_vec()),
+                _ => (),
+            }
+        }
+        if let (Some(monster), Some((group_field, group))) = (monster, group)
+            && found.is_none()
+        {
+            // The config is the number after the group.
+            let config = numbers.iter().find(|(field, _)| *field == group_field + 1).map_or(0, |(_, v)| *v);
+            found = Some((monster, group, config));
+        }
+        if position.is_none() {
+            position = places.iter().find_map(|place| position_in(place));
+        }
+    }
+    let (monster_id, group_id, config_id) = found?;
+    Some(SceneMonster {
+        entity_id: u32::try_from(entity_id).ok()?,
+        monster_id: u32::try_from(monster_id).ok()?,
+        group_id: u32::try_from(group_id).ok()?,
+        config_id: u32::try_from(config_id).ok()?,
+        position,
+    })
+}
+
+/// The monsters that came into view in this command, if it says that (it is the command the
+/// gadgets come in too).
+pub fn matches_scene_monsters(data: &[u8]) -> Option<Vec<SceneMonster>> {
+    if data.len() < 40 {
+        return None;
+    }
+    let message = Unk::parse_from_bytes(data).ok()?;
+    let monsters: Vec<SceneMonster> = message
+        .unknown_fields()
+        .iter()
+        .filter_map(|(_, value)| match value {
+            LengthDelimited(bytes) => scene_monster(bytes),
+            _ => None,
+        })
+        .collect();
+    (!monsters.is_empty()).then_some(monsters)
+}
+
 /// The gadgets that came into view in this command, if it says that.  What it
 /// holds is a list of entities, most of which are not gadgets of the world.
 pub fn matches_scene_gadgets(data: &[u8]) -> Option<Vec<SceneGadget>> {

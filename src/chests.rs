@@ -536,14 +536,16 @@ impl Tracker {
         let now = Instant::now();
         self.last_position = Some((now, position));
         let coverage = Arc::make_mut(&mut self.coverage);
+        // As far as the radar the user chose.
+        let radius = coverage::seen_radius(crate::chest_watch::radar());
         let changed = match self.last_place {
             Some((at, last_x, last_y))
                 if now.duration_since(at) <= Duration::from_secs(20)
                     && (x - last_x).hypot(y - last_y) <= coverage::MAX_STEP =>
             {
-                coverage.mark_walk((last_x, last_y), (x, y))
+                coverage.mark_walk_within((last_x, last_y), (x, y), radius)
             }
-            _ => coverage.mark_disc(x, y),
+            _ => coverage.mark_disc_within(x, y, radius),
         };
         self.last_place = Some((now, x, y));
         if changed {

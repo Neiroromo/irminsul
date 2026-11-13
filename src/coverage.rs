@@ -22,6 +22,13 @@ pub const ROWS: usize = 1032;
 /// is sent from about 110 m (measured), and a cell is up to 23 m from its
 /// middle to its corner, so what is in a cell is within about 95 m of the walk.
 pub const SEEN_RADIUS: f32 = 70.;
+/// How far from the walk a cell counts as looked at, for the radar the user chose (metres):
+/// the usual radar (90 m) gives `SEEN_RADIUS`, a wider one looks farther (what is in a cell
+/// is then within about the radar of the walk), with more wrong guesses.
+pub fn seen_radius(radar: f32) -> f32 {
+    (radar - 20.).max(20.)
+}
+
 /// A walk is followed between two places this far apart, and no further: more
 /// is not a walk but a jump (a teleport), which goes nowhere between.
 pub const MAX_STEP: f32 = 400.;
@@ -75,7 +82,12 @@ impl Coverage {
 
     /// Marks what is within reach of a place.  Returns whether anything was new.
     pub fn mark_disc(&mut self, x: f32, y: f32) -> bool {
-        let reach = (SEEN_RADIUS / CELL).ceil() as i32 + 1;
+        self.mark_disc_within(x, y, SEEN_RADIUS)
+    }
+
+    /// Marks what is within `radius` of a place.  Returns whether anything was new.
+    pub fn mark_disc_within(&mut self, x: f32, y: f32, radius: f32) -> bool {
+        let reach = (radius / CELL).ceil() as i32 + 1;
         let Some((column, row)) = Self::cell(x, y) else {
             return false;
         };
@@ -90,7 +102,7 @@ impl Coverage {
                     X0 + (c as f32 + 0.5) * CELL,
                     Y0 + (r as f32 + 0.5) * CELL,
                 );
-                if (middle.0 - x).hypot(middle.1 - y) > SEEN_RADIUS {
+                if (middle.0 - x).hypot(middle.1 - y) > radius {
                     continue;
                 }
                 let (word, mask) = Self::bit(c as usize, r as usize);
@@ -105,12 +117,17 @@ impl Coverage {
 
     /// Marks what is within reach of a walk from one place to another.
     pub fn mark_walk(&mut self, from: (f32, f32), to: (f32, f32)) -> bool {
+        self.mark_walk_within(from, to, SEEN_RADIUS)
+    }
+
+    /// Marks what is within `radius` of a walk from one place to another.
+    pub fn mark_walk_within(&mut self, from: (f32, f32), to: (f32, f32), radius: f32) -> bool {
         let distance = (to.0 - from.0).hypot(to.1 - from.1);
         let steps = (distance / STEP).ceil().max(1.) as usize;
         let mut changed = false;
         for step in 0..=steps {
             let t = step as f32 / steps as f32;
-            changed |= self.mark_disc(from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+            changed |= self.mark_disc_within(from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t, radius);
         }
         changed
     }
@@ -169,6 +186,18 @@ impl Coverage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wider_radar_looks_farther() {
+        assert_eq!(seen_radius(90.), SEEN_RADIUS);
+        let mut usual = Coverage::new();
+        usual.mark_disc_within(500., 500., seen_radius(90.));
+        let mut wide = Coverage::new();
+        wide.mark_disc_within(500., 500., seen_radius(130.));
+        assert!(!usual.is_covered(600., 500.));
+        assert!(wide.is_covered(600., 500.));
+        assert!(!wide.is_covered(650., 500.));
+    }
 
     #[test]
     fn a_place_looked_at_is_marked_around_it() {

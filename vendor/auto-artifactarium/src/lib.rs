@@ -69,6 +69,7 @@ use crate::unk_util::{
     find_scene_arrival, find_teleport_target,
     matches_scene_gadgets, matches_talent_update,
 };
+pub use crate::unk_util::SceneMonster;
 pub use crate::unk_util::{QuestUpdate, StoryEntry, StoryStatus, AvatarMotion, AvatarPropUpdate, GadgetInteraction, PlayerLocation, SceneGadget, TalentUpdate};
 pub use crate::unk_util::{
     matches_achievement_all_data_notify, matches_avatars_all_data_notify,
@@ -270,6 +271,27 @@ pub enum SnifferEvent {
     DecryptFailed {
         count: u32,
     },
+    /// A body that was sent compressed was unpacked.
+    BodyDecompressed {
+        command_id: u16,
+        method: &'static str,
+        from: usize,
+        to: usize,
+    },
+    /// A body that looks compressed (its header declares a larger size) could not be
+    /// unpacked: how it begins, to tell what it is packed with.
+    CompressedBodyUnread {
+        command_id: u16,
+        len: usize,
+        declared: usize,
+        start: Vec<u8>,
+        /// The whole command (header and body), to find out offline how it is packed.  Not
+        /// for what is sent before the session key (the login), which has the account's token.
+        sample: Option<Vec<u8>>,
+        header_len: u16,
+        /// It was sent before the session key: it is of the login.
+        login: bool,
+    },
     /// A command with a large payload was decrypted.
     LargeCommand {
         command_id: u16,
@@ -331,6 +353,14 @@ impl fmt::Display for SnifferEvent {
             Self::DecryptFailed { count } => {
                 write!(f, "{count} commands could not be decrypted")
             }
+            Self::BodyDecompressed { command_id, method, from, to } => {
+                write!(f, "command {command_id}: body unpacked ({method}), {from} -> {to} bytes")
+            }
+            Self::CompressedBodyUnread { command_id, len, declared, start, .. } => write!(
+                f,
+                "command {command_id}: body of {len} bytes declares {declared} and could NOT be unpacked, begins {}",
+                bytes_as_hex(start)
+            ),
             Self::LargeCommand { command_id, len } => {
                 write!(f, "command {command_id}, {len} bytes")
             }
@@ -365,6 +395,8 @@ pub struct GameSniffer {
     /// fit (the first may be a part of one that began before).
     key_resumed: bool,
     resumed_misses: u32,
+    /// How many times this connection it was told that a body was (or could not be) unpacked.
+    inflate_notes: u32,
 }
 
 impl GameSniffer {
@@ -389,6 +421,19 @@ impl GameSniffer {
     pub fn set_retained_key(mut self, key: Option<Vec<u8>>) -> Self {
         self.retained_key = key;
         self
+    }
+
+    /// When the client's generator was seeded, as found in an earlier run: the key of a
+    /// later connection of the same game session (after the teapot, co-op ...) is found
+    /// from it.
+    pub fn set_client_seed(mut self, seed: Option<u64>) -> Self {
+        self.client_seed = seed;
+        self
+    }
+
+    /// When the client's generator was seeded, once known.
+    pub fn client_seed(&self) -> Option<u64> {
+        self.client_seed
     }
 
     /// The session key of the connection, once found.
@@ -440,6 +485,7 @@ impl GameSniffer {
                 self.nickname_found = false;
                 self.header_uid_seen = false;
                 self.samples_saved = 0;
+                self.inflate_notes = 0;
                 self.recv_kcp = None;
                 self.sent_kcp = None;
                 self.key = None;
@@ -636,7 +682,8 @@ impl GameSniffer {
 
         decrypt_command(key, &mut data);
 
-        let command = GameCommand::try_new(data)?;
+        let mut command = GameCommand::try_new(data)?;
+        self.inflate(&mut command);
         if command.data_len >= 300 {
             self.events.push(SnifferEvent::LargeCommand {
                 command_id: command.command_id,
@@ -705,6 +752,134 @@ impl GameSniffer {
     }
 }
 
+impl GameSniffer {
+    /// Unpacks the body of a command that was sent compressed.  The header of such a command
+    /// declares (field 8) the size the body has unpacked; the answer to the token request of a
+    /// later connection of a game session (coming back from the teapot or from co-op) is one.
+    fn inflate(&mut self, command: &mut GameCommand) {
+        let split = (command.header_len as usize).min(command.proto_data.len());
+        let declared = match PacketHead::parse_from_bytes(&command.proto_data[..split]) {
+            Ok(head) => match head.special_fields.unknown_fields().get(8) {
+                Some(UnknownValueRef::Varint(size)) => size as usize,
+                _ => return,
+            },
+            Err(_) => return,
+        };
+        let body = &command.proto_data[split..];
+        if body.len() < 16 || declared <= body.len() || declared > 64 << 20 {
+            return;
+        }
+        match decompress(body, declared) {
+            Some((method, unpacked)) => {
+                if self.inflate_notes < 8 {
+                    self.inflate_notes += 1;
+                    self.events.push(SnifferEvent::BodyDecompressed {
+                        command_id: command.command_id,
+                        method,
+                        from: body.len(),
+                        to: unpacked.len(),
+                    });
+                }
+                command.proto_data.truncate(split);
+                command.data_len = unpacked.len() as u32;
+                command.proto_data.extend_from_slice(&unpacked);
+            }
+            None => {
+                if self.inflate_notes < 8 {
+                    self.inflate_notes += 1;
+                    let in_session = matches!(self.key, Some(Key::Session(_)));
+                    self.events.push(SnifferEvent::CompressedBodyUnread {
+                        command_id: command.command_id,
+                        len: body.len(),
+                        declared,
+                        start: body[..16].to_vec(),
+                        // The answer to the token request is kept too (it is the one that
+                        // matters most: without it nothing of the connection can be read),
+                        // though it has the token of the login: it stays on this computer.
+                        sample: (command.proto_data.len() <= 200_000).then(|| command.proto_data.clone()),
+                        login: !in_session,
+                        header_len: command.header_len,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Unpacks `body` with whichever of the usual ways gives exactly `size` bytes.
+fn decompress(body: &[u8], size: usize) -> Option<(&'static str, Vec<u8>)> {
+    use std::io::Read;
+    fn all(reader: impl Read, size: usize) -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(size);
+        reader.take(size as u64 + 1).read_to_end(&mut out).ok()?;
+        (out.len() == size).then_some(out)
+    }
+    if body.starts_with(&[0x28, 0xB5, 0x2F, 0xFD])
+        && let Ok(decoder) = ruzstd::decoding::StreamingDecoder::new(body)
+        && let Some(out) = all(decoder, size)
+    {
+        return Some(("zstd", out));
+    }
+    if body.starts_with(&[0x1F, 0x8B])
+        && let Some(out) = all(flate2::read::GzDecoder::new(body), size)
+    {
+        return Some(("gzip", out));
+    }
+    if body[0] & 0x0F == 8
+        && (u16::from(body[0]) << 8 | u16::from(body[1])) % 31 == 0
+        && let Some(out) = all(flate2::read::ZlibDecoder::new(body), size)
+    {
+        return Some(("zlib", out));
+    }
+    if let Ok(out) = lz4_flex::block::decompress(body, size)
+        && out.len() == size
+    {
+        return Some(("lz4", out));
+    }
+    if let Some(out) = all(flate2::read::DeflateDecoder::new(body), size) {
+        return Some(("deflate", out));
+    }
+    if let Ok(out) = snap::raw::Decoder::new().decompress_vec(body)
+        && out.len() == size
+    {
+        return Some(("snappy", out));
+    }
+    // With a few bytes before the packed part, of whatever they are.
+    for skip in 0..=8usize.min(body.len() - 1) {
+        let rest = &body[skip..];
+        if let Some(out) = all(brotli_decompressor::Decompressor::new(rest, 4096), size) {
+            return Some((if skip == 0 { "brotli" } else { "brotli after a few bytes" }, out));
+        }
+        if skip > 0 {
+            if let Some(out) = all(flate2::read::DeflateDecoder::new(rest), size) {
+                return Some(("deflate after a few bytes", out));
+            }
+            if let Some(out) = all(flate2::read::ZlibDecoder::new(rest), size) {
+                return Some(("zlib after a few bytes", out));
+            }
+            if let Ok(decoder) = ruzstd::decoding::StreamingDecoder::new(rest)
+                && let Some(out) = all(decoder, size)
+            {
+                return Some(("zstd after a few bytes", out));
+            }
+            if let Ok(out) = lz4_flex::block::decompress(rest, size)
+                && out.len() == size
+            {
+                return Some(("lz4 after a few bytes", out));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if lzma_rs::lzma_decompress(&mut std::io::BufReader::new(body), &mut out).is_ok() && out.len() == size {
+        return Some(("lzma", out));
+    }
+    let mut out = Vec::new();
+    if lzma_rs::xz_decompress(&mut std::io::BufReader::new(body), &mut out).is_ok() && out.len() == size {
+        return Some(("xz", out));
+    }
+    None
+}
+
 /// Describes a token response the seed could not be read from, to tell a
 /// compressed or otherwise changed body from a missing key.
 fn describe_unreadable_token_response(command: &GameCommand) -> SnifferEvent {
@@ -763,6 +938,15 @@ pub fn matches_player_props(game_command: &GameCommand) -> Option<Vec<(u64, u64)
 /// The gadgets (chests among them) that came into view, if the command says so.
 pub fn matches_gadgets_in_view(game_command: &GameCommand) -> Option<Vec<SceneGadget>> {
     matches_scene_gadgets(&game_command.proto_data)
+}
+
+/// The monsters that came into view (the ones alive: one that was killed is not sent), if the
+/// command says so.
+pub fn matches_monsters_in_view(game_command: &GameCommand) -> Option<Vec<SceneMonster>> {
+    if game_command.from_client {
+        return None;
+    }
+    crate::unk_util::matches_scene_monsters(&game_command.proto_data)
 }
 
 /// What was done to a gadget of the world (a chest opened, say), if the command
@@ -875,6 +1059,37 @@ mod resume_tests {
         // Pieces that do not fit a few times are borne; a good one goes on.
         assert!(sniffer.receive_command(vec![2; 40]).is_none());
         assert!(sniffer.receive_command(on_the_wire(&key, 20584, b"x")).is_some());
+    }
+
+    #[test]
+    fn a_compressed_body_is_unpacked() {
+        use std::io::Write;
+        let plain: Vec<u8> = (0..3000u32).map(|n| (n % 7) as u8).collect();
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&plain).unwrap();
+        let packed = encoder.finish().unwrap();
+        // The header: field 8 (varint) is the size unpacked.
+        let mut head = vec![0x40];
+        let mut size = plain.len();
+        while size >= 0x80 {
+            head.push((size as u8 & 0x7F) | 0x80);
+            size >>= 7;
+        }
+        head.push(size as u8);
+        let mut data = head.clone();
+        data.extend_from_slice(&packed);
+        let mut command = GameCommand {
+            command_id: 1,
+            header_len: head.len() as u16,
+            data_len: packed.len() as u32,
+            proto_data: data,
+            from_client: false,
+        };
+        let mut sniffer = GameSniffer::new();
+        sniffer.inflate(&mut command);
+        assert_eq!(&command.proto_data[head.len()..], &plain[..]);
+        assert_eq!(command.data_len as usize, plain.len());
+        assert!(decompress(&lz4_flex::block::compress(&plain), plain.len()).is_some_and(|(method, out)| method == "lz4" && out == plain));
     }
 
     #[test]

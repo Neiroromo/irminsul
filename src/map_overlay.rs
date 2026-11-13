@@ -63,6 +63,17 @@ pub struct MapOverlaySettings {
     /// Drawn only while the game is the window in front: not over Irminsul or
     /// any other window.
     pub only_over_game: bool,
+    /// The markers are drawn over the big map of the game itself, when it is open.
+    pub on_game_map: bool,
+    /// How big the markers are there: 1 is the usual size.
+    pub game_map_size: f32,
+    /// The enemies of the kinds chosen on the map that are near the player are listed at the
+    /// right of the game, and within how many metres.
+    pub nearby_mobs: bool,
+    pub nearby_metres: f32,
+    /// Where the list is, from the top left of the window of the game; where it is at first
+    /// (at the right, under what is told of the changes) if not moved.
+    pub nearby_pos: Option<[i32; 2]>,
 }
 
 impl Default for MapOverlaySettings {
@@ -76,6 +87,11 @@ impl Default for MapOverlaySettings {
             opacity: 0.85,
             vignette: 0.55,
             only_over_game: false,
+            on_game_map: false,
+            game_map_size: 1.,
+            nearby_mobs: true,
+            nearby_metres: 80.,
+            nearby_pos: None,
         }
     }
 }
@@ -154,6 +170,11 @@ pub struct SharedMarkers<'a> {
     pub show_range: bool,
     /// Changes when what is shown does.
     pub version: u64,
+    /// The traffic of the game can not be read (the key of the connection was not found):
+    /// nothing here is right, so nothing is shown but that.
+    pub key_lost: bool,
+    /// The monsters alive around the player, as the game sent them.
+    pub mobs: &'a crate::mob_watch::MobsSeen,
 }
 
 /// What the picture shown was made from.
@@ -210,6 +231,23 @@ pub struct MapOverlay {
     /// `IRMINSUL_MAP_OVERLAY_DEBUG`: shown from the start, whatever is in front,
     /// for looking at it without the keyboard.
     debug: bool,
+    /// The markers over the big map of the game itself.
+    game_map: crate::game_map::GameMap,
+    /// What the picture of those markers was made from (the last number: 0 for the markers,
+    /// more for the sign that the place is being looked for).
+    game_made: Option<(u64, u64, u64, usize, i32, u32)>,
+    /// The panel of the settings of those markers is shown (the key is held over the big
+    /// map of the game): where the window of the map was before, and what the panel shows.
+    panel_saved: Option<[i32; 4]>,
+    panel_made: Option<crate::game_map_panel::PanelState>,
+    /// The key was pressed while the traffic can not be read: that is told until then.
+    no_key_until: Option<Instant>,
+    no_key_shown: bool,
+    /// The list of the enemies near: its window, and what it shows.
+    near_window: Option<crate::game_map::MarksWindow>,
+    near_made: Option<(Vec<crate::game_map_panel::NearRow>, [i32; 2], bool)>,
+    /// The list was being moved the last time it was looked at.
+    near_moving: bool,
 }
 
 impl MapOverlay {
@@ -254,6 +292,15 @@ impl MapOverlay {
             manual_level: None,
             last_place: None,
             debug,
+            game_map: crate::game_map::GameMap::new(),
+            game_made: None,
+            panel_saved: None,
+            panel_made: None,
+            no_key_until: None,
+            no_key_shown: false,
+            near_window: None,
+            near_made: None,
+            near_moving: false,
         }
     }
 
@@ -321,10 +368,63 @@ impl MapOverlay {
         player: Option<crate::PlayerPlace>,
         matched: Option<&Matched>,
         shared: &SharedMarkers,
-        _russian: bool,
+        russian: bool,
     ) {
         let player = player.or(self.fake_player);
         self.handle_key(ctx);
+        self.game_map_frame(ctx, snapshot, player, matched, shared, russian);
+        self.nearby_frame(ctx, player, shared, russian);
+        // The traffic of the game can not be read: no map (it would be wrong), only that
+        // said when the key is pressed.
+        if shared.key_lost {
+            if self.visible || self.editing || self.pressed_at.is_some() {
+                self.no_key_until = Some(Instant::now() + Duration::from_secs(5));
+            }
+            self.visible = false;
+            self.editing = false;
+            self.close_panel();
+            if let Some(window) = &self.window {
+                window.set_visible(false);
+                window.set_edit(false);
+            }
+            self.made = None;
+            match self.no_key_until {
+                Some(until) if Instant::now() < until => {
+                    if !self.no_key_shown {
+                        let (picture, width, height) = crate::game_map_panel::no_key(russian);
+                        let (screen_w, screen_h) = screen_size();
+                        let game = self.game_map.game_rect().unwrap_or([0, 0, screen_w, screen_h]);
+                        let x = game[0] + (game[2] - width as i32) / 2;
+                        let y = game[1] + (game[3] as f32 * 0.2) as i32;
+                        self.game_map.show([x, y, width as i32, height as i32], &picture);
+                        self.no_key_shown = true;
+                    }
+                    ctx.request_repaint_after(Duration::from_millis(200));
+                }
+                _ => {
+                    if self.no_key_shown {
+                        self.game_map.hide();
+                        self.no_key_shown = false;
+                    }
+                    self.no_key_until = None;
+                }
+            }
+            return;
+        }
+        if self.no_key_shown {
+            self.game_map.hide();
+            self.no_key_shown = false;
+            self.no_key_until = None;
+        }
+        // While the big map of the game is open, this map is not shown: it is closed.  The
+        // key held then shows the settings of the markers over the game's map.
+        if self.game_map.map_open() {
+            self.visible = false;
+            self.editing = false;
+            self.panel_frame(ctx, russian);
+            return;
+        }
+        self.close_panel();
         // Out of sight when something else than the game (or us) is in front;
         // it comes back by itself.
         // The map of a place that is not known is not shown (that of the last place
@@ -445,9 +545,23 @@ impl MapOverlay {
             })
             .unwrap_or(0);
         if self.editing {
-            window.set_buttons(map_render::level_buttons(width as usize, max_level));
+            // The buttons of the levels, and after them the one of the markers over the
+            // game's own map.
+            let mut buttons = map_render::level_buttons(width as usize, max_level);
+            let levels = buttons.len();
+            buttons.push(map_render::sync_button());
+            buttons.push(map_render::mobs_button());
+            window.set_buttons(buttons);
             if let Some(number) = window.take_click() {
-                self.manual_level = Some(number);
+                if number == levels {
+                    self.settings.on_game_map = !self.settings.on_game_map;
+                    self.dirty = true;
+                } else if number == levels + 1 {
+                    self.settings.nearby_mobs = !self.settings.nearby_mobs;
+                    self.dirty = true;
+                } else {
+                    self.manual_level = Some(number);
+                }
                 LOOK_CHANGED.store(true, Ordering::Relaxed);
             }
         } else {
@@ -572,6 +686,8 @@ impl MapOverlay {
                     max: max_level,
                     buttons: self.editing,
                 }),
+                sync: self.editing.then_some(self.settings.on_game_map),
+                mobs: self.editing.then_some(self.settings.nearby_mobs),
             });
             window.present(&picture, width as usize, height as usize);
             self.made = Some(made);
@@ -589,6 +705,319 @@ impl MapOverlay {
             self.settings.save();
         }
         ctx.request_repaint_after(Duration::from_millis(50));
+    }
+
+    /// The enemies of the kinds chosen on the map that are alive near the player, listed at the
+    /// right of the game (where what changed is told, under it): the picture of the kind, the
+    /// name, how far, and how much higher or lower.
+    fn nearby_frame(&mut self, ctx: &Context, player: Option<crate::PlayerPlace>, shared: &SharedMarkers, russian: bool) {
+        use crate::game_map_panel::NearRow;
+        let mut rows: Vec<NearRow> = Vec::new();
+        let shown = self.settings.nearby_mobs
+            && !shared.key_lost
+            && !self.game_map.map_open()
+            && (self.debug || hotkey::front() == hotkey::FRONT_GAME);
+        if let (true, Some(player)) = (shown, player) {
+            let data = markers::data();
+            // The nearest of each kind of monster, and how many of it are near.
+            let mut kinds: Vec<(u32, u32, f32, f32, usize, [f32; 2])> = Vec::new();
+            for mob in &shared.mobs.alive {
+                let Some(label) = mob.label.filter(|label| shared.enabled.contains(label)) else {
+                    continue;
+                };
+                if mob.scene != player.scene {
+                    continue;
+                }
+                let across = (mob.position[0] - player.position[0]).hypot(mob.position[2] - player.position[2]);
+                let up = mob.position[1] - player.position[1];
+                if across.hypot(up) > self.settings.nearby_metres {
+                    continue;
+                }
+                // One line for the variants of a monster (the ids differ in the last digits).
+                let family = if mob.monster / 1_000_000 == 28 { mob.monster } else { mob.monster / 100 * 100 };
+                match kinds.iter_mut().find(|kind| kind.0 == family) {
+                    Some(kind) => {
+                        kind.4 += 1;
+                        if across < kind.2 {
+                            (kind.2, kind.3, kind.5) = (across, up, [mob.position[0] - player.position[0], mob.position[2] - player.position[2]]);
+                        }
+                    }
+                    None => kinds.push((family, label, across, up, 1, [mob.position[0] - player.position[0], mob.position[2] - player.position[2]])),
+                }
+            }
+            kinds.sort_by(|a, b| a.2.total_cmp(&b.2));
+            for (family, label, across, up, count, [dx, dz]) in kinds.into_iter().take(6) {
+                let kind = data.label(label);
+                // The way to it from the way the player faces (0 is along z, 90 along x, as the
+                // game tells it), in steps, so that the list is not drawn anew all the time.
+                let turn = player.yaw.filter(|_| across >= 2.).map(|yaw| {
+                    let bearing = dx.atan2(dz).to_degrees();
+                    let turn = (bearing - yaw).rem_euclid(360.);
+                    ((turn / 10.).round() as i32 * 10) % 360
+                });
+                rows.push(NearRow {
+                    icon: kind.and_then(|kind| self.mark_images.image(kind.id, &kind.icon)),
+                    name: crate::mob_watch::name_of(family, russian)
+                        .map(str::to_owned)
+                        .or_else(|| kind.map(|kind| kind.name(russian).to_owned()))
+                        .unwrap_or_default(),
+                    count,
+                    metres: across.round() as i32,
+                    up: up.round() as i32,
+                    turn,
+                });
+            }
+            if !rows.is_empty() {
+                self.mark_images.poll();
+            }
+        }
+        // While the key of the map over the game is held, the list can be moved with the mouse
+        // (it is shown then even with nothing in it, to be put where it is wanted).
+        let moving = shown && (self.editing || (self.pressed_at.is_some_and(|at| at.elapsed() >= HOLD) && hotkey::is_down()));
+        if self.near_moving && !moving {
+            self.settings.save();
+        }
+        self.near_moving = moving;
+        if rows.is_empty() && !moving {
+            if self.near_made.take().is_some()
+                && let Some(window) = &self.near_window
+            {
+                window.set_movable(false);
+                window.hide();
+            }
+            return;
+        }
+        let (screen_w, screen_h) = screen_size();
+        let game = self.game_map.game_rect().unwrap_or([0, 0, screen_w, screen_h]);
+        let (picture, width, height) = crate::game_map_panel::nearby(&rows, russian, moving);
+        let window = self.near_window.get_or_insert_with(crate::game_map::MarksWindow::new);
+        // Where it was moved to is where it stays.
+        if moving
+            && self.near_made.as_ref().is_some_and(|made| made.2)
+            && let Some(at) = window.position()
+            && self.near_made.as_ref().is_some_and(|made| made.1 != at)
+        {
+            self.settings.nearby_pos = Some([at[0] - game[0], at[1] - game[1]]);
+        }
+        let place = match self.settings.nearby_pos {
+            // Not out of the window of the game.
+            Some(offset) => [
+                game[0] + offset[0].clamp(0, (game[2] - width as i32).max(0)),
+                game[1] + offset[1].clamp(0, (game[3] - height as i32).max(0)),
+            ],
+            None => [game[0] + game[2] - width as i32 - 24, game[1] + (game[3] as f32 * 0.36) as i32],
+        };
+        let made = (rows, place, moving);
+        if self.near_made.as_ref() != Some(&made) {
+            window.show([place[0], place[1], width as i32, height as i32], &picture);
+            self.near_made = Some(made);
+        }
+        window.set_movable(moving);
+        ctx.request_repaint_after(Duration::from_millis(if moving { 40 } else { 250 }));
+    }
+
+    /// What the thread that looks at the game is doing, in words.
+    fn game_map_status(&self, russian: bool) -> String {
+        use crate::game_map::Status;
+        let tr = |en: &'static str, ru: &'static str| if russian { ru } else { en };
+        let status = match self.game_map.status() {
+            Status::Off => tr("starting", "запускается"),
+            Status::NoGame => tr("the game is not in front", "игра не на переднем плане"),
+            Status::MapClosed => tr("the game's map is not open", "карта в игре не открыта"),
+            Status::MapOpen => tr("the game's map is open", "карта в игре открыта"),
+            Status::Looking => tr("looking for the place of the map", "ищу место на карте"),
+            Status::Following => tr("following the map", "слежу за картой"),
+        };
+        let alike = self.game_map.synced().map_or(String::new(), |synced| format!(" ({:.0}%)", synced.score * 100.));
+        format!("{}: {status}{alike}", tr("Now", "Сейчас"))
+    }
+
+    /// Puts the window of the map back as it was before the panel of the settings was shown
+    /// in it.
+    fn close_panel(&mut self) {
+        let Some(saved) = self.panel_saved.take() else {
+            return;
+        };
+        if let Some(window) = &self.window {
+            window.set_edit(false);
+            window.set_visible(false);
+            window.set_buttons(Vec::new());
+            window.set_rect(saved);
+            let _ = window.take_changed();
+            let _ = window.take_click();
+        }
+        self.panel_made = None;
+        self.made = None;
+        LOOK_CHANGED.store(true, Ordering::Relaxed);
+    }
+
+    /// The big map of the game is open: while the key is held, the settings of the markers
+    /// over it are shown at the right of the game, in the middle; nothing else of this map.
+    fn panel_frame(&mut self, ctx: &Context, russian: bool) {
+        use crate::game_map_panel::{self as panel, PANEL_HEIGHT, PANEL_WIDTH, PanelState};
+        let held = self.pressed_at.is_some_and(|at| at.elapsed() >= HOLD) && hotkey::is_down();
+        let game = self.game_map.game_rect();
+        let (true, Some(game)) = (held, game) else {
+            self.close_panel();
+            if let Some(window) = &self.window {
+                window.set_visible(false);
+                window.set_edit(false);
+            }
+            self.made = None;
+            if self.pressed_at.is_some() {
+                ctx.request_repaint_after(Duration::from_millis(40));
+            }
+            return;
+        };
+        if self.window.is_none() {
+            self.window = Some(OverlayWindow::new(self.first_rect()));
+        }
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        if self.panel_saved.is_none() {
+            self.panel_saved = Some(window.rect());
+            self.panel_made = None;
+            let x = game[0] + game[2] - PANEL_WIDTH as i32 - (game[2] as f32 * 0.085) as i32;
+            let y = game[1] + (game[3] - PANEL_HEIGHT as i32) / 2;
+            window.set_rect([x, y, PANEL_WIDTH as i32, PANEL_HEIGHT as i32]);
+            let _ = window.take_click();
+        }
+        window.set_buttons(panel::panel_buttons());
+        window.set_visible(true);
+        window.set_edit(true);
+        let mut changed = false;
+        if let Some(button) = window.take_click() {
+            match button {
+                panel::BUTTON_TOGGLE => self.settings.on_game_map = !self.settings.on_game_map,
+                panel::BUTTON_SMALLER => self.settings.game_map_size = ((self.settings.game_map_size - 0.1) * 10.).round().max(5.) / 10.,
+                panel::BUTTON_BIGGER => self.settings.game_map_size = ((self.settings.game_map_size + 0.1) * 10.).round().min(25.) / 10.,
+                panel::BUTTON_MOBS => self.settings.nearby_mobs = !self.settings.nearby_mobs,
+                _ => (),
+            }
+            changed = true;
+        }
+        let _ = window.take_changed();
+        let _ = window.take_wheel();
+        let state = PanelState {
+            on: self.settings.on_game_map,
+            mobs: self.settings.nearby_mobs,
+            size: self.settings.game_map_size,
+            status: self.game_map_status(russian),
+            russian,
+        };
+        if self.panel_made.as_ref() != Some(&state) {
+            window.present(&panel::panel(&state), PANEL_WIDTH, PANEL_HEIGHT);
+            self.panel_made = Some(state);
+        }
+        if changed {
+            self.settings.save();
+        }
+        ctx.request_repaint_after(Duration::from_millis(50));
+    }
+
+    /// The markers over the big map of the game itself: tells the thread that looks at the
+    /// game what it needs, and draws the markers where it found them to be.
+    fn game_map_frame(
+        &mut self,
+        ctx: &Context,
+        snapshot: &Snapshot,
+        player: Option<crate::PlayerPlace>,
+        matched: Option<&Matched>,
+        shared: &SharedMarkers,
+        russian: bool,
+    ) {
+        // Not when the traffic of the game can not be read: where the player is and what is
+        // collected is not known then.
+        let enabled = self.settings.on_game_map && !shared.key_lost;
+        // The game is looked at also for closing this map when its own is opened, and for
+        // where to put the list of the enemies near.
+        let watch = enabled || self.settings.enabled || self.settings.nearby_mobs;
+        if !watch && self.game_made.is_none() && self.game_map.status() == crate::game_map::Status::Off {
+            return;
+        }
+        let data = markers::data();
+        let world = data.atlas.map(WORLD).map(|def| def.info());
+        let place = world.as_ref().and_then(|info| {
+            player.filter(|player| player.map == WORLD).map(|player| [info.origin[0] + player.at[0], info.origin[1] + player.at[1]])
+        });
+        let map = world.clone().and_then(|info| crate::map_tiles::version_dir(&info.version).map(|dir| (dir, info)));
+        self.game_map.update(ctx, watch, enabled, place, map);
+        let (Some(synced), Some(info), true) = (self.game_map.synced(), world, enabled) else {
+            // The place is being looked for (or the map is on its way): no markers, which
+            // would be at wrong places, but a sign that it is being done.
+            let looking = enabled && self.game_map.status() == crate::game_map::Status::Looking;
+            match self.game_map.game_rect().filter(|_| looking) {
+                Some(game) => {
+                    let phase = (ctx.input(|input| input.time) * 3.) as u32 % 3 + 1;
+                    let made = (0, 0, 0, 0, 0, phase);
+                    if self.game_made != Some(made) {
+                        let (picture, width, height) = crate::game_map_panel::looking(phase - 1, russian);
+                        let x = game[0] + (game[2] - width as i32) / 2;
+                        let y = game[1] + (game[3] as f32 * 0.115) as i32;
+                        self.game_map.show([x, y, width as i32, height as i32], &picture);
+                        self.game_made = Some(made);
+                    }
+                    ctx.request_repaint_after(Duration::from_millis(200));
+                }
+                None => {
+                    // (Unless it tells that the traffic can not be read.)
+                    if !self.no_key_shown {
+                        self.game_map.hide();
+                    }
+                    self.game_made = None;
+                }
+            }
+            return;
+        };
+        self.mark_images.poll();
+        let (width, height) = (synced.rect[2] as f32, synced.rect[3] as f32);
+        let view = synced.view;
+        let scale = view.zoom * height;
+        // The tiles the view is held up to, so that they come if they are not there (those
+        // of the world: the map shown here may be another).
+        if self.tiles.info().map == WORLD {
+            self.tiles.poll();
+            for rows in [540., 240.] {
+                let small = view.zoom * rows;
+                for key in map_render::needed_tiles(&info, view.center, small, width / height * rows, rows) {
+                    let _ = self.tiles.image(key);
+                }
+            }
+        }
+        let made = (
+            self.game_map.version(),
+            snapshot.version ^ matched.map_or(0, |matched| matched.version().rotate_left(7)),
+            shared.version,
+            self.icons_there(&data, shared),
+            (self.settings.game_map_size * 100.) as i32,
+            0,
+        );
+        if self.game_made == Some(made) {
+            return;
+        }
+        let center = vec2(view.center[0], view.center[1]);
+        let half = vec2(width / 2. / scale, height / 2. / scale);
+        let marks = self.marks(&info, &data, None, shared, (center - half, center + half), true);
+        let icons = self.icons(&info, snapshot, matched, shared);
+        // Smaller the farther out the map is zoomed, as the signs of the game are fewer
+        // there: from 11 (all the way out) to 24 (all the way in) for a window 1080 high.
+        let near = ((view.zoom / 0.00036).ln() / (0.0022f32 / 0.00036).ln()).clamp(0., 1.);
+        let size = (height / 1080. * (11. + 13. * near) * self.settings.game_map_size).clamp(8., 96.);
+        // Too many to tell apart: dots.
+        let dots = marks.len() > 1200;
+        let picture = map_render::render_marks(
+            width as usize,
+            height as usize,
+            &move |at| view.to_screen(at, width, height),
+            &marks,
+            &icons,
+            size,
+            dots,
+            1.,
+        );
+        self.game_map.show(synced.rect, &picture);
+        self.game_made = Some(made);
     }
 
     /// How many of the pictures of the chosen kinds are there (they are asked for
@@ -822,6 +1251,66 @@ impl MapOverlay {
             .size(12.)
             .color(crate::achievement_tab::DIM),
         );
+        ui.add_space(6.);
+        ui.label(RichText::new(tr("Markers over the game's own map", "Отметки поверх карты самой игры")).size(16.).strong());
+        ui.label(
+            RichText::new(tr(
+                "When the big map of the game is open, the markers chosen here are drawn over it, where they are, and follow it as it is moved and zoomed. The program looks at the screen for this (only while the game is in front; nothing of the game is read, nothing is kept or sent). The surface of the world only. It can also be turned on and off with the button M at the top left of the map over the game, while its key is held.",
+                "Когда в игре открыта большая карта, выбранные здесь отметки рисуются поверх неё на своих местах и следуют за ней при сдвиге и масштабировании. Для этого программа смотрит на экран (только пока игра на переднем плане; из игры ничего не читается, ничего не сохраняется и не отправляется). Только поверхность мира. Включать и выключать можно и кнопкой M слева вверху карты поверх игры, пока зажата её клавиша.",
+            ))
+            .size(12.)
+            .color(crate::achievement_tab::DIM),
+        );
+        changed |= ui
+            .checkbox(&mut self.settings.on_game_map, RichText::new(tr("Draw the markers over the game's map", "Рисовать отметки поверх карты игры")).size(14.))
+            .changed();
+        if self.settings.on_game_map {
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut self.settings.game_map_size, 0.5..=2.5)
+                        .text(tr("Size of the markers", "Размер отметок"))
+                        .custom_formatter(|value, _| format!("{:.0}%", value * 100.)),
+                )
+                .changed();
+            ui.label(RichText::new(self.game_map_status(russian)).size(12.).color(crate::achievement_tab::DIM));
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
+        ui.add_space(6.);
+        ui.label(RichText::new(tr("Enemies near", "Мобы рядом")).size(16.).strong());
+        ui.label(
+            RichText::new(tr(
+                "The game sends the enemies that are alive around you. Those of the kinds chosen on the map are listed at the right of the game while they are near: how far, and how much higher or lower. An enemy that is killed marks its marker of the map as done (for a day); a marker you stand by with no enemy there is marked too. The button E at the top left of the map over the game, while its key is held, turns the list on and off.",
+                "Игра присылает живых противников вокруг вас. Те из них, чьи виды выбраны на карте, показываются справа поверх игры, пока они рядом: расстояние и насколько выше или ниже. Убитый противник отмечает свою метку на карте выполненной (на сутки); метка, у которой вы стоите и где противников нет, тоже отмечается. Кнопка E слева вверху карты поверх игры, пока зажата её клавиша, включает и выключает список.",
+            ))
+            .size(12.)
+            .color(crate::achievement_tab::DIM),
+        );
+        changed |= ui
+            .checkbox(&mut self.settings.nearby_mobs, RichText::new(tr("List the enemies near", "Показывать мобов рядом")).size(14.))
+            .changed();
+        if self.settings.nearby_mobs {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(tr(
+                        "Hold the key of the map over the game and drag the list to move it.",
+                        "Зажмите клавишу карты поверх игры и перетащите список мышью, чтобы передвинуть.",
+                    ))
+                    .size(12.)
+                    .color(crate::achievement_tab::DIM),
+                );
+                if self.settings.nearby_pos.is_some() && ui.small_button(tr("Put it back", "Вернуть на место")).clicked() {
+                    self.settings.nearby_pos = None;
+                    changed = true;
+                }
+            });
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut self.settings.nearby_metres, 20.0..=250.)
+                        .text(tr("Within, m", "В радиусе, м"))
+                        .custom_formatter(|value, _| format!("{value:.0}")),
+                )
+                .changed();
+        }
         if ui.button(tr("Reset the place and size", "Сбросить положение и размер")).clicked() {
             let defaults = MapOverlaySettings::default();
             self.settings.size = defaults.size;

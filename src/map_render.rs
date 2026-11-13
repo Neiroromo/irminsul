@@ -71,6 +71,89 @@ pub fn level_buttons(width: usize, max: usize) -> Vec<[i32; 4]> {
         .collect()
 }
 
+/// Where the button of the markers over the game's own map is in the picture: x, y, width,
+/// height.
+pub fn sync_button() -> [i32; 4] {
+    [BUTTON_MARGIN, BUTTON_MARGIN, BUTTON, BUTTON]
+}
+
+/// Where the button of the list of the enemies near is in the picture, under the other.
+pub fn mobs_button() -> [i32; 4] {
+    [BUTTON_MARGIN, BUTTON_MARGIN + BUTTON + BUTTON_GAP, BUTTON, BUTTON]
+}
+
+/// A picture that is empty but for the markers and the chests, each where `place` puts it
+/// (given where it is on the full size map): to lay over the game's own map.  Blue, green,
+/// red and the share that is seen, the three taken by it, row by row from the top.
+pub fn render_marks(
+    width: usize,
+    height: usize,
+    place: &dyn Fn([f32; 2]) -> [f32; 2],
+    markers: &[MarkDraw],
+    icons: &[Icon],
+    size: f32,
+    dots: bool,
+    opacity: f32,
+) -> Vec<u8> {
+    let mut canvas = Canvas { width, height, rgb: vec![[0; 3]; width * height], drawn: vec![0; width * height] };
+    draw_marks(&mut canvas, place, markers, icons, size, dots);
+    let mut out = vec![0u8; width * height * 4];
+    for (at, (rgb, drawn)) in canvas.rgb.iter().zip(&canvas.drawn).enumerate() {
+        if *drawn == 0 {
+            continue;
+        }
+        // The colour was laid on black by its share: taken back, it is the colour itself.
+        let seen = *drawn as f32 / 255.;
+        let share = seen * opacity.clamp(0., 1.);
+        let base = at * 4;
+        for channel in 0..3 {
+            out[base + channel] = ((rgb[2 - channel] as f32 / seen).min(255.) * share) as u8;
+        }
+        out[base + 3] = (share * 255.) as u8;
+    }
+    out
+}
+
+/// The markers of the kinds that are chosen, and the chests.
+fn draw_marks(canvas: &mut Canvas, place: &dyn Fn([f32; 2]) -> [f32; 2], markers: &[MarkDraw], icons: &[Icon], size: f32, dots: bool) {
+    let (w, h) = (canvas.width as f32, canvas.height as f32);
+    for mark in markers {
+        let [x, y] = place(mark.at);
+        if x < -size || y < -size || x > w + size || y > h + size {
+            continue;
+        }
+        let strength = if mark.done { 0.35 } else { 1. };
+        match (&mark.image, dots) {
+            (Some(image), false) => {
+                let (image_w, image_h) = (image.size[0] as f32, image.size[1] as f32);
+                for py in (y - size / 2.).floor() as i32..(y + size / 2.).ceil() as i32 {
+                    for px in (x - size / 2.).floor() as i32..(x + size / 2.).ceil() as i32 {
+                        let u = (px as f32 + 0.5 - (x - size / 2.)) / size * image_w;
+                        let v = (py as f32 + 0.5 - (y - size / 2.)) / size * image_h;
+                        let [r, g, b, a] = sample_rgba(image, u, v);
+                        canvas.blend(px, py, [r as u8, g as u8, b as u8], a / 255. * strength);
+                    }
+                }
+            }
+            (None, false) => {
+                canvas.disc(x, y, size / 4., mark.color, strength);
+                canvas.ring(x, y, size / 4., 1., [0, 0, 0], 0.6 * strength);
+            }
+            (_, true) => canvas.disc(x, y, (size / 10.).max(2.), mark.color, strength),
+        }
+        if mark.done && !dots {
+            canvas.ring(x, y, size / 2., 1.5, [0x4a, 0xde, 0x80], 0.8);
+        }
+    }
+    for icon in icons {
+        let [x, y] = place(icon.at);
+        if x < -12. || y < -12. || x > w + 12. || y > h + 12. {
+            continue;
+        }
+        draw_chest(canvas, x, y, icon.tier, icon.look);
+    }
+}
+
 pub struct Params<'a> {
     pub width: usize,
     pub height: usize,
@@ -102,6 +185,12 @@ pub struct Params<'a> {
     pub dots: bool,
     pub dim: f32,
     pub levels: Option<LevelsView>,
+    /// The button that turns the markers over the game's own map on and off (shown while
+    /// the map is moved), and whether they are on.
+    pub sync: Option<bool>,
+    /// The button that turns the list of the enemies near on and off (under the other), and
+    /// whether it is on.
+    pub mobs: Option<bool>,
     /// The place the player is in is not on any map: nothing is drawn but a dark
     /// ground, the player in the middle, and a question mark.
     pub unknown: bool,
@@ -490,48 +579,10 @@ pub fn render(p: &Params) -> Vec<u8> {
         }
     }
 
-    // The markers of the kinds that are chosen.
-    for mark in p.markers {
-        let x = half_w + (mark.at[0] - p.center[0]) * p.scale;
-        let y = half_h + (mark.at[1] - p.center[1]) * p.scale;
-        if x < -12. || y < -12. || x > w as f32 + 12. || y > h as f32 + 12. {
-            continue;
-        }
-        let strength = if mark.done { 0.35 } else { 1. };
-        match (&mark.image, p.dots) {
-            (Some(image), false) => {
-                let size = 20.;
-                let (image_w, image_h) = (image.size[0] as f32, image.size[1] as f32);
-                for py in (y - size / 2.).floor() as i32..(y + size / 2.).ceil() as i32 {
-                    for px in (x - size / 2.).floor() as i32..(x + size / 2.).ceil() as i32 {
-                        let u = (px as f32 + 0.5 - (x - size / 2.)) / size * image_w;
-                        let v = (py as f32 + 0.5 - (y - size / 2.)) / size * image_h;
-                        let [r, g, b, a] = sample_rgba(image, u, v);
-                        let colour = [r, g, b];
-                        canvas.blend(px, py, [colour[0] as u8, colour[1] as u8, colour[2] as u8], a / 255. * strength);
-                    }
-                }
-            }
-            (None, false) => {
-                canvas.disc(x, y, 5., mark.color, strength);
-                canvas.ring(x, y, 5., 1., [0, 0, 0], 0.6 * strength);
-            }
-            (_, true) => canvas.disc(x, y, 2., mark.color, strength),
-        }
-        if mark.done && !p.dots {
-            canvas.ring(x, y, 10., 1.5, [0x4a, 0xde, 0x80], 0.8);
-        }
-    }
-
-    // The chests.
-    for icon in p.icons {
-        let x = half_w + (icon.at[0] - p.center[0]) * p.scale;
-        let y = half_h + (icon.at[1] - p.center[1]) * p.scale;
-        if x < -12. || y < -12. || x > w as f32 + 12. || y > h as f32 + 12. {
-            continue;
-        }
-        draw_chest(&mut canvas, x, y, icon.tier, icon.look);
-    }
+    // The markers of the kinds that are chosen, and the chests.
+    let (center, scale) = (p.center, p.scale);
+    let place = move |at: [f32; 2]| [half_w + (at[0] - center[0]) * scale, half_h + (at[1] - center[1]) * scale];
+    draw_marks(&mut canvas, &place, p.markers, p.icons, 20., p.dots);
 
     // The player.
     if let Some(player) = p.player {
@@ -582,6 +633,23 @@ pub fn render(p: &Params) -> Vec<u8> {
     }
     if let Some(levels) = p.levels {
         draw_levels(&mut out, w, h, levels);
+    }
+    for (on, [x, y, size, _], glyph) in [
+        (p.sync, sync_button(), [0b101, 0b111, 0b111, 0b101, 0b101]),
+        (p.mobs, mobs_button(), [0b111, 0b100, 0b111, 0b100, 0b111]),
+    ] {
+        let Some(on) = on else {
+            continue;
+        };
+        // A square with a letter (M: the map of the game, E: the enemies near), amber when on.
+        let (amber, navy) = ([0xff, 0xc3, 0x4a], [0x16, 0x1e, 0x30]);
+        for py in y.max(0)..(y + size).min(h as i32) {
+            for px in x.max(0)..(x + size).min(w as i32) {
+                let rim = px < x + 2 || px >= x + size - 2 || py < y + 2 || py >= y + size - 2;
+                put(&mut out, w, px as usize, py as usize, if rim || on { amber } else { navy });
+            }
+        }
+        put_glyph(&mut out, w, (x + size / 2, y + size / 2), glyph, 3, if on { [0, 0, 0] } else { [255, 255, 255] });
     }
     if p.unknown {
         // A question mark where the buttons of the levels are.
@@ -805,6 +873,8 @@ mod tests {
             unknown: false,
             dim: 0.,
             levels: None,
+            sync: None,
+            mobs: None,
         }
     }
 

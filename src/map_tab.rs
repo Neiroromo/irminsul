@@ -191,6 +191,11 @@ pub struct MapTab {
     /// The kinds of marker that can be marked as collected: what is not here is always shown
     /// and a click on it does not mark it.
     markable: BTreeSet<u32>,
+    /// The kinds of enemies that are followed by the program itself (defeated or not, as the
+    /// game says): they show what is done, though they are not marked by hand.
+    mob_labels: BTreeSet<u32>,
+    /// Both, for the map over the game.
+    marked_kinds: BTreeSet<u32>,
     /// The window where the user chooses them, and what was searched in it.
     marking_open: bool,
     marking_search: String,
@@ -405,6 +410,11 @@ impl MapTab {
             enabled: markers::DEFAULT_SHOWN.into_iter().collect(),
             only_domains: None,
             markable: default_markable(&markers::data()),
+            mob_labels: {
+                let data = markers::data();
+                data.children(50).filter(|label| !label.resin).map(|label| label.id).collect()
+            },
+            marked_kinds: BTreeSet::new(),
             marking_open: false,
             marking_search: String::new(),
             domain_popup: None,
@@ -788,8 +798,13 @@ impl MapTab {
         marks: &crate::chest_watch::ChestMarks,
         player: Option<crate::PlayerPlace>,
         language: Language,
+        key_lost: bool,
+        mobs: &crate::mob_watch::MobsSeen,
     ) {
         self.match_found(snapshot);
+        if self.marked_kinds.len() != self.markable.len() + self.mob_labels.len() || !self.markable.is_subset(&self.marked_kinds) {
+            self.marked_kinds = self.markable.union(&self.mob_labels).copied().collect();
+        }
         self.markers.use_account(snapshot.uid);
         self.apply_chest_marks(marks);
         // What is chosen on the map here is on the map over the game too.
@@ -800,12 +815,14 @@ impl MapTab {
         }
         let shown = crate::map_overlay::SharedMarkers {
             enabled: &self.enabled,
-            markable: &self.markable,
+            markable: &self.marked_kinds,
             store: &self.markers,
             hide_done: self.only_closed,
             show_faint: self.show_faint,
             show_range: self.show_range,
             version,
+            key_lost,
+            mobs,
         };
         self.overlay.frame(
             ctx,
@@ -1084,7 +1101,7 @@ impl MapTab {
                         let done = if tracked && markers::CHEST_LABELS.contains(&label.id) {
                             snapshot.chests.iter().filter(|chest| chest.tier() == chest_tier(label.id) && chest.opened_at.is_some()).count()
                         } else {
-                            done_counts.get(&label.id).copied().filter(|_| self.markable.contains(&label.id)).unwrap_or(0)
+                            done_counts.get(&label.id).copied().filter(|_| self.markable.contains(&label.id) || self.mob_labels.contains(&label.id)).unwrap_or(0)
                         };
                         let count = if done > 0 { format!("{done}/{total}") } else { total.to_string() };
                         let texture = self.icons.get(label.id, &label.icon);
@@ -1391,7 +1408,7 @@ impl MapTab {
                     continue;
                 }
                 // What can not be marked is always as it is: never done, never hidden.
-                let state = if self.markable.contains(&label_id) {
+                let state = if self.markable.contains(&label_id) || self.mob_labels.contains(&label_id) {
                     self.markers.state(point.id, label.refresh, now)
                 } else {
                     MarkerState::Available
@@ -1778,7 +1795,8 @@ impl MapTab {
                 self.route.resolve(&data);
                 let now = markers::unix_now();
                 let stops = crate::route_ui::targets(&self.route, &data, self.map, &|point, label| {
-                    self.markable.contains(&label.id) && matches!(self.markers.state(point.id, label.refresh, now), MarkerState::Done { .. })
+                    (self.markable.contains(&label.id) || self.mob_labels.contains(&label.id))
+                        && matches!(self.markers.state(point.id, label.refresh, now), MarkerState::Done { .. })
                 });
                 if stops.is_empty() {
                     self.route.message = tr("There is nothing to visit on this map for this choice.", "На этой карте для такого выбора нет точек.").to_owned();

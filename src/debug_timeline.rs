@@ -49,6 +49,8 @@ impl DebugTimeline {
     }
 
     pub fn record(&mut self, text: impl AsRef<str>) {
+        // The background log of the run has the timeline too.
+        tracing::info!(target: "timeline", "{}", text.as_ref());
         let line = format!("{} {}", Local::now().format("%H:%M:%S%.3f"), text.as_ref());
         if let Some(file) = &mut self.file {
             // Flushed per line: the file is read while the app is running.
@@ -69,6 +71,26 @@ impl DebugTimeline {
         let saved = debug_dir().and_then(|dir| {
             fs::create_dir_all(&dir)?;
             fs::write(dir.join(&name), bytes)?;
+            Ok(())
+        });
+        if let Err(e) = saved {
+            tracing::warn!("unable to save {name}: {e:#}");
+        }
+    }
+
+    /// Keeps a command whose body is packed in a way that is not known: the size it declares
+    /// (4 bytes), the length of its header (2 bytes), then the header and the body.
+    pub fn save_packed(&mut self, command_id: u16, declared: usize, header_len: u16, bytes: &[u8], login: bool) {
+        // One of the login has the token of the account in it: it is named so, to be removed
+        // when it was looked at.
+        let kind = if login { "packed-login" } else { "packed" };
+        let name = format!("{kind}-{command_id}-{}.bin", Local::now().format("%Y-%m-%d_%H-%M-%S%.3f"));
+        let mut data = (declared as u32).to_be_bytes().to_vec();
+        data.extend_from_slice(&header_len.to_be_bytes());
+        data.extend_from_slice(bytes);
+        let saved = debug_dir().and_then(|dir| {
+            fs::create_dir_all(&dir)?;
+            fs::write(dir.join(&name), data)?;
             Ok(())
         });
         if let Err(e) = saved {

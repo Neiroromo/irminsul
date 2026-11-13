@@ -8,7 +8,7 @@ use anime_game_data::AnimeGameData;
 use anyhow::{Context, Result, anyhow};
 use auto_artifactarium::{
     ConnectionPacket, GameCommand, GamePacket, GameSniffer, SnifferEvent, matches_achievement_packet, matches_avatar_packet,
-    matches_avatar_props, matches_avatar_stats, matches_scene_arrival, matches_teleport_target, matches_gadget_use, matches_gadgets_in_view, matches_item_changes,
+    matches_avatar_props, matches_avatar_stats, matches_monsters_in_view, matches_scene_arrival, matches_teleport_target, matches_gadget_use, matches_gadgets_in_view, matches_item_changes,
     matches_avatar_motion, matches_quest_list, StoryStatus, matches_quest_updates, matches_story_update, matches_item_packet, matches_location_of_player, matches_talent_level, matches_player_mora,
     matches_player_props, matches_uid_of_player,
 };
@@ -91,6 +91,11 @@ impl AppStateManager {
 
     pub fn update_chests(&mut self, chests: std::sync::Arc<crate::chests::Snapshot>) {
         self.app_state.chests = chests;
+        let _ = self.state_tx.send(self.app_state.clone());
+    }
+
+    pub fn update_mobs(&mut self, mobs: std::sync::Arc<crate::mob_watch::MobsSeen>) {
+        self.app_state.mobs = mobs;
         let _ = self.state_tx.send(self.app_state.clone());
     }
 
@@ -195,6 +200,9 @@ pub struct Monitor {
     /// The state of the chests of the markers of the other maps, told by the game.
     watch: crate::chest_watch::ChestWatch,
     watch_published: u64,
+    /// The monsters around the player, and the markers of enemies that are defeated.
+    mobs: crate::mob_watch::MobWatch,
+    mobs_published: u64,
     /// The state of the things done once (oculi, seelies, puzzles), told by the game.
     objects: crate::object_watch::ObjectWatch,
     /// The quests that are done, told by the game, for the markers of the quests.
@@ -226,7 +234,10 @@ impl Monitor {
         let motion_at = Instant::now();
         let command_counts = Default::default();
         let counts_since = std::time::Instant::now();
-        let sniffer = GameSniffer::new().set_initial_keys(keys.clone()).set_retained_key(load_session_key());
+        let sniffer = GameSniffer::new()
+            .set_initial_keys(keys.clone())
+            .set_retained_key(load_session_key())
+            .set_client_seed(load_client_seed());
         let (packet_tx, packet_rx) = mpsc::unbounded_channel();
         let (status_tx, status_rx) = mpsc::unbounded_channel();
 
@@ -269,6 +280,8 @@ impl Monitor {
             scenes: crate::scenes::Scenes::new(),
             watch: crate::chest_watch::ChestWatch::new(),
             watch_published: 0,
+            mobs: crate::mob_watch::MobWatch::new(),
+            mobs_published: 0,
             objects: crate::object_watch::ObjectWatch::new(),
             quests: crate::quest_watch::QuestWatch::new(),
             puzzles: crate::puzzle_watch::PuzzleWatch::new(),
@@ -387,6 +400,8 @@ impl Monitor {
         self.last_data = None;
         self.chests.start_session();
         self.watch.start_session();
+        self.mobs.start_session();
+        self.publish_mobs();
         self.objects.start_session();
         self.puzzles.start_session();
         self.census_seen.clear();
@@ -433,9 +448,28 @@ impl Monitor {
 
     /// Gadgets of the world came into view: the chests among them are noted,
     /// and the user is told of the ones that were not told of yet.
+    /// Gives the monsters alive around the player to the rest of the program, when they changed.
+    fn publish_mobs(&mut self) {
+        if self.mobs.alive_version() != self.mobs_published {
+            self.mobs_published = self.mobs.alive_version();
+            self.app_state.update_mobs(std::sync::Arc::new(self.mobs.seen()));
+        }
+    }
+
     fn chests_in_view(&mut self, gadgets: &[auto_artifactarium::SceneGadget]) {
         self.chests_for_session();
         self.take_census(gadgets);
+        // What a monster drops tells that it was killed.
+        let killed = self.mobs.drops(gadgets, &crate::markers::data());
+        if !killed.is_empty() {
+            let names: Vec<String> = killed
+                .iter()
+                .map(|monster| format!("{} ({monster})", crate::mob_watch::name_of(*monster, false).unwrap_or("?")))
+                .collect();
+            self.record(format!("monsters killed: {}", names.join(", ")));
+            self.publish_mobs();
+            self.publish_chest_marks();
+        }
         self.floors.observe(gadgets);
         self.scenes.note_gadgets(gadgets);
         // Chests of other scenes (Enkanomiya and the like) are not of the world: their
@@ -509,6 +543,7 @@ impl Monitor {
         let version = self
             .watch
             .version()
+            .wrapping_add(self.mobs.version().rotate_left(10))
             .wrapping_add(self.objects.version().rotate_left(20))
             .wrapping_add(self.quests.version().rotate_left(40))
             .wrapping_add(self.puzzles.version().rotate_left(50));
@@ -516,6 +551,10 @@ impl Monitor {
             self.watch_published = version;
             let mut marks = self.watch.snapshot();
             marks.version = version;
+            // The markers of enemies that are defeated, and those that are back.
+            let (defeated, back) = self.mobs.snapshot();
+            marks.opened.extend(defeated);
+            marks.closed.extend(back);
             // Only the chests of the other maps are given to the maps for now: what the
             // watches of the oculi, seelies, puzzles, gathering and quests say is kept apart,
             // not used (see `EXTRA_MARKS` and docs/tracking-logic.md).
@@ -716,6 +755,9 @@ impl Monitor {
             self.timeline.record(event.to_string());
             match event {
                 SnifferEvent::UndecryptedSample(bytes) => self.timeline.save_sample(&bytes),
+                SnifferEvent::CompressedBodyUnread { command_id, declared, sample: Some(sample), header_len, login, .. } => {
+                    self.timeline.save_packed(command_id, declared, header_len, &sample, login);
+                }
                 SnifferEvent::PlayerUid(uid) => self.session_uid = Some(uid),
                 // Only a fallback: the token response is the better source.
                 SnifferEvent::HeaderUserId(uid) => {
@@ -755,8 +797,20 @@ impl Monitor {
                             .to_string(),
                     ));
                 }
+                SnifferEvent::SessionKeyLost => {
+                    // Nothing of the connection can be read from here on.
+                    self.app_state.update_progress(|progress| progress.failed = true);
+                }
                 SnifferEvent::SessionKeyResumed => {
                     self.resumed = true;
+                    // The lists of the login are not sent again when a running connection is
+                    // joined: what the account has is what was kept of it (the program was
+                    // running in this same game session, or there would be no key).  So what
+                    // changes from now on is told, as after a login.  If something changed
+                    // while the program was not running, the first change of that item is
+                    // told bigger or smaller by that much.
+                    self.captured.items = true;
+                    self.captured.characters = true;
                     self.app_state.update_capture_error(None);
                     // What comes now is kept as it comes, as after a login.
                     crate::probe::session_started();
@@ -779,7 +833,10 @@ impl Monitor {
             "packet decoder panicked, resetting it: {}",
             panic_message(&panic)
         );
-        self.sniffer = GameSniffer::new().set_initial_keys(self.keys.clone()).set_retained_key(load_session_key());
+        self.sniffer = GameSniffer::new()
+            .set_initial_keys(self.keys.clone())
+            .set_retained_key(load_session_key())
+            .set_client_seed(load_client_seed());
         self.record("packet decoder panicked and was reset");
         self.app_state.update_capture_error(Some(
             "Packet decoding failed. Log in to the game again while capture is running."
@@ -800,6 +857,11 @@ impl Monitor {
             self.session_key_changed = false;
             if let Some(key) = self.sniffer.session_key() {
                 save_session_key(key);
+            }
+            // And when the game's generator was seeded: the key of the next connection of
+            // this game session (after the teapot, co-op ...) is found from it.
+            if let Some(seed) = self.sniffer.client_seed() {
+                save_client_seed(seed);
             }
         }
         let commands = match received {
@@ -977,6 +1039,10 @@ impl Monitor {
                         }
                         _ => 0,
                     };
+                    // An enemy marker walked by with no enemy sent there is defeated.
+                    self.mobs.player_at(location.scene, location.position, &crate::markers::data());
+                    self.publish_mobs();
+                    self.publish_chest_marks();
                     crate::probe::track(&format!(
                         "scene={} pos={:.1},{:.1},{:.1} yaw={} floor={floor} map={}",
                         location.scene,
@@ -1033,6 +1099,14 @@ impl Monitor {
                     self.puzzles.entered(scene, position);
 
                 }
+            }
+
+            // Monsters that came into view (the ones alive).
+            if let Some(monsters) = guarded("monsters in view", || matches_monsters_in_view(&command)) {
+                let scene = self.scenes.scene_now().unwrap_or(3);
+                self.mobs.saw(scene, &monsters, &crate::markers::data());
+                self.publish_mobs();
+                self.publish_chest_marks();
             }
 
             // Chests that came into view (closed ones), and chests opened.
@@ -1393,6 +1467,20 @@ const EXTRA_MARKS: bool = false;
 
 fn session_key_path() -> Option<std::path::PathBuf> {
     eframe::storage_dir(crate::APP_ID).map(|dir| dir.join("session_key.bin"))
+}
+
+fn client_seed_path() -> Option<std::path::PathBuf> {
+    eframe::storage_dir(crate::APP_ID).map(|dir| dir.join("session_seed.txt"))
+}
+
+fn load_client_seed() -> Option<u64> {
+    std::fs::read_to_string(client_seed_path()?).ok()?.trim().parse().ok()
+}
+
+fn save_client_seed(seed: u64) {
+    if let Some(path) = client_seed_path() {
+        let _ = std::fs::write(path, seed.to_string());
+    }
 }
 
 fn load_session_key() -> Option<Vec<u8>> {

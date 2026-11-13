@@ -1,10 +1,10 @@
-# Irminsul
+# Aaru
 
 **English** · [Русский](README.ru.md)
 
-> This is a fork of [konkers/irminsul](https://github.com/konkers/irminsul), the original packet-capture exporter for Genshin Impact. The original project is licensed under the MIT License, and the license file is kept in this repository.
+> Aaru is a fork of [konkers/irminsul](https://github.com/konkers/irminsul), the original packet-capture exporter for Genshin Impact. The original project is licensed under the MIT License, and the license file is kept in this repository.
 
-Irminsul reads Genshin Impact's network traffic (packet capture, no screen scanning) and turns it into data you can use: a [Genshin Optimizer](https://frzyc.github.io/genshin-optimizer/) export in the GOOD format, a character and material browser, a farming planner, and a live map that knows what you have already collected.
+The program (still named Irminsul inside: `irminsul.exe`) reads Genshin Impact's network traffic (packet capture, no screen scanning) and turns it into data you can use: a [Genshin Optimizer](https://frzyc.github.io/genshin-optimizer/) export in the GOOD format, a character and material browser, a farming planner, and a live map that knows what you have already collected.
 
 Nothing is injected into the game and no game files are modified.
 
@@ -24,7 +24,8 @@ Nothing is injected into the game and no game files are modified.
 - One profile per game account, always holding the freshest capture, with switching between accounts
 - Starting the game through HoYoPlay in a way that lets Irminsul see its traffic, optional start with Windows, tray mode, and a progress popup while the capture runs
 - A "what changed" popup showing the mora and items you gained or spent while playing
-- Resuming the capture after restarting the program, without restarting the game
+- Resuming the capture after restarting the program, without restarting the game; when the key of the connection can not be found, the map over the game says so instead of showing wrong data
+- A background log that is always written and thrown away when the program closes, unless you press the button in Power Tools to keep it (so a problem that cannot be repeated is still on record)
 
 **Planner**
 
@@ -39,6 +40,8 @@ Nothing is injected into the game and no game files are modified.
 - **Show on the map** for any material, from the Materials tab, the planner and the right-click menu: the plants, ores, enemies, ley lines and domains where it comes from
 - Weekly bosses, old one-time domains and artifact domains, with their rewards shown on click
 - Resin bosses are marked as such instead of showing a respawn time
+- **Markers over the game's own big map**: when the big map of the game is open, the chosen markers are drawn over it where they belong, follow it as it is moved and zoomed, and are shown only once the map is recognized
+- **Enemies**: the game sends the enemies that are alive near you, so the list of those of the chosen kinds is shown at the right of the game with the distance, the height difference and an arrow to walk to them (the list can be dragged); when the last enemy of a camp is killed, its marker is marked done for a day
 
 **Route planner**
 
@@ -64,7 +67,7 @@ The program is a single `irminsul.exe`: all other data is built in, and the prof
 
 ## Getting started
 
-1. Download `irminsul.exe` from the [latest release](https://github.com/Neiroromo/irminsul/releases/latest).
+1. Download `irminsul.exe` from the [latest release](https://github.com/Neiroromo/Aaru/releases/latest).
 2. Run it and accept the administrator prompt.
 3. Start the packet capture, then start the game and enter the door (or use the built-in game launcher). Irminsul has to be running before the game reaches the login handshake.
 4. When the checkmarks appear, the tabs fill with your data.
